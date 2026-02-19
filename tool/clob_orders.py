@@ -34,7 +34,11 @@ def _mk_client(cfg: Config) -> ClobClient:
         api_secret=cfg.clob_api_secret,
         api_passphrase=cfg.clob_api_passphrase,
     )
-
+    
+    import inspect
+    print("DEBUG create_order sig:", inspect.signature(client.create_order))
+    print("DEBUG create_order doc:", (client.create_order.__doc__ or "")[:300])
+    
     return ClobClient(
         host=cfg.clob_host.rstrip("/"),
         chain_id=cfg.chain_id,
@@ -92,9 +96,9 @@ def place_dual_orders_for_market(cfg: Config, market: dict) -> dict[str, Any]:
         fee_rate_bps=maker_fee_bps,
     )
 
-    signed_up = client.create_order(up_order, order_type=OrderType.GTC, options=opts)
-    signed_down = client.create_order(down_order, order_type=OrderType.GTC, options=opts)
-
+    signed_up = client.create_order(up_order, OrderType.GTC, opts)
+    signed_down = client.create_order(down_order, OrderType.GTC, opts)
+    
     up_resp = client.post_order(signed_up)
     down_resp = client.post_order(signed_down)
 
