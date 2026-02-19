@@ -11,20 +11,14 @@ def _safe_json(resp: requests.Response):
         raise RuntimeError(f"Gamma no devolvió JSON. Status={resp.status_code}, body={resp.text[:300]}")
 
 def _extract_slot_start_iso(m: dict) -> str | None:
-    """
-    Para mercados 5m, el slot suele estar en events[0].eventStartTime.
-    Fallbacks por si cambia el shape.
-    """
-    # 1) Lo correcto en estos 5m:
+    # 1) Preferido: startTime del evento (donde está el slot)
     evs = m.get("events")
     if isinstance(evs, list) and evs:
         ev0 = evs[0] if isinstance(evs[0], dict) else None
         if ev0:
-            st = ev0.get("eventStartTime") or ev0.get("startTime") or ev0.get("startDate")
-            if st:
-                return st
+            return ev0.get("startTime") or ev0.get("eventStartTime") or ev0.get("startDate")
 
-    # 2) Fallbacks (menos fiables para “slot”):
+    # 2) Fallbacks (a veces viene “plano”)
     return m.get("eventStartTime") or m.get("startTime") or m.get("startDate")
 
 def gamma_list_markets_for_series_in_window(cfg: Config) -> list[dict]:
@@ -66,25 +60,22 @@ def gamma_list_markets_for_series_in_window(cfg: Config) -> list[dict]:
             break
 
         # Procesamos este batch
+        out = []
         for m in markets:
-            st_iso = _extract_slot_start_iso(m)
-            if not st_iso:
+            st = _extract_slot_start_iso(m)
+            if not st:
                 continue
-
+        
             try:
-                st_dt = datetime.fromisoformat(st_iso.replace("Z", "+00:00")).astimezone(pytz.UTC)
+                st_dt = datetime.fromisoformat(st.replace("Z", "+00:00")).astimezone(pytz.UTC)
             except Exception:
                 continue
-
-            # Como viene ordenado asc, podemos:
-            if st_dt < start_utc:
-                continue
-
-            if st_dt > end_utc:
-                # Si ya hemos empezado a recoger, podemos cortar
-                return out
-
-            out.append(m)
+        
+            # Mejor: end exclusivo para ventanas [start, end)
+            if start_utc <= st_dt < end_utc:
+                slug = m.get("slug", "?")
+                print(f"[MATCH] {slug} start={st}")
+                out.append(m)
 
         offset += limit
         if offset >= cfg.max_markets:
