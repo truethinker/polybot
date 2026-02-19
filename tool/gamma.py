@@ -46,11 +46,10 @@ def gamma_list_markets_for_series_in_window(cfg: Config) -> list[dict]:
         params = {
             "limit": limit,
             "offset": offset,
-            "active": "true",
+            # QUITA active / enableOrderBook
             "closed": "false",
             "archived": "false",
             "seriesSlug": cfg.series_slug,
-            "enableOrderBook": "true",
             "sortBy": "startTime",
             "sortDirection": "asc",
         }
