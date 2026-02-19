@@ -26,7 +26,7 @@ class Config:
     price_down: float
     size_down: float
 
-    dry_run: true
+    dry_run: bool
     max_markets: int
 
     @property
