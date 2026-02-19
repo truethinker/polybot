@@ -52,3 +52,5 @@ def main():
 
 if __name__ == "__main__":
     raise SystemExit(main())
+if cfg.parse_local_dt(cfg.window_end_local) <= cfg.parse_local_dt(cfg.window_start_local):
+    raise RuntimeError("WINDOW_END debe ser posterior a WINDOW_START (en hora local Europe/Madrid).")
