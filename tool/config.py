@@ -5,8 +5,11 @@ import pytz
 
 @dataclass
 class Config:
+    
     gamma_host: str
     clob_host: str
+    funder_address: str
+    signature_type: int
 
     private_key: str
     clob_api_key: str
@@ -58,6 +61,9 @@ def load_config() -> Config:
     gamma_host = _getenv("GAMMA_HOST", "https://gamma-api.polymarket.com")
     clob_host = _getenv("CLOB_HOST", "https://clob.polymarket.com")
 
+    funder_address = _getenv("FUNDER_ADDRESS", required=True)
+    signature_type = int(_getenv("SIGNATURE_TYPE", "1"))
+
     private_key = _getenv("PRIVATE_KEY", required=True)
     clob_api_key = _getenv("CLOB_API_KEY", required=True)
     clob_api_secret = _getenv("CLOB_API_SECRET", required=True)
@@ -80,6 +86,8 @@ def load_config() -> Config:
     return Config(
         gamma_host=gamma_host,
         clob_host=clob_host,
+        funder_address=funder_address,
+        signature_type=signature_type,
         private_key=private_key,
         clob_api_key=clob_api_key,
         clob_api_secret=clob_api_secret,
