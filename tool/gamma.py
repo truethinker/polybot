@@ -10,75 +10,65 @@ def _safe_json(resp: requests.Response):
     except Exception:
         raise RuntimeError(f"Gamma no devolvió JSON. Status={resp.status_code}, body={resp.text[:300]}")
 
-def _extract_slot_start_iso(m: dict) -> str | None:
-    # 1) Preferido: startTime del evento (donde está el slot)
-    evs = m.get("events")
-    if isinstance(evs, list) and evs:
-        ev0 = evs[0] if isinstance(evs[0], dict) else None
-        if ev0:
-            return ev0.get("startTime") or ev0.get("eventStartTime") or ev0.get("startDate")
-
-    # 2) Fallbacks (a veces viene “plano”)
-    return m.get("eventStartTime") or m.get("startTime") or m.get("startDate")
-
 def gamma_list_markets_for_series_in_window(cfg: Config) -> list[dict]:
     """
-    Trae markets de la serie y filtra por *slot start* dentro de la ventana.
-    Ventana: cfg.window_start_local / cfg.window_end_local (Madrid) => se convierten a UTC.
-    Gamma devuelve timestamps ISO con Z (UTC).
+    Pide a Gamma SOLO markets cuyo startDate cae dentro de la ventana (UTC),
+    ordenados por startDate asc. Luego filtra por la serie mediante slug prefix.
     """
     url = f"{cfg.gamma_host.rstrip('/')}/markets"
 
-    start_utc = datetime.fromisoformat(cfg.window_start_utc_iso().replace("Z", "+00:00")).astimezone(pytz.UTC)
-    end_utc = datetime.fromisoformat(cfg.window_end_utc_iso().replace("Z", "+00:00")).astimezone(pytz.UTC)
+    # Ventana local (Madrid) -> UTC ISO Z (lo hace tu Config)
+    start_min = cfg.window_start_utc_iso()
+    start_max = cfg.window_end_utc_iso()
 
-    out: list[dict] = []
-    limit = min(100, cfg.max_markets)  # paginamos en bloques
+    # Para la serie BTC 5m, el slug de market suele empezar por "btc-updown-5m-"
+    # (tu ejemplo: slug="btc-updown-5m-1771407900")
+    slug_prefix = "btc-updown-5m-"
+
+    out = []
     offset = 0
+    limit = min(cfg.max_markets, 200)  # 100/200 según permita Gamma
 
     while True:
         params = {
             "limit": limit,
             "offset": offset,
-            # QUITA active / enableOrderBook
+
+            # OJO: estos son los nombres que entiende Gamma:
+            "order": "startDate",
+            "ascending": "true",
             "closed": "false",
             "archived": "false",
-            "seriesSlug": cfg.series_slug,
-            "sortBy": "startTime",
-            "sortDirection": "asc",
+
+            # Filtrado server-side por fecha:
+            "start_date_min": start_min,
+            "start_date_max": start_max,
         }
 
         r = requests.get(url, params=params, timeout=30)
         r.raise_for_status()
+        page = _safe_json(r)
 
-        markets = _safe_json(r)
-        if markets:
-            first_iso = _extract_slot_start_iso(markets[0])
-            last_iso = _extract_slot_start_iso(markets[-1])
-            print(f"[Gamma page offset={offset}] first={first_iso} last={last_iso} count={len(markets)}")
-        if not isinstance(markets, list) or not markets:
-            break
+        if not isinstance(page, list):
+            raise RuntimeError(f"Respuesta Gamma inesperada: {type(page)}")
 
-        # Procesamos este batch
-        out = []
-        for m in markets:
-            st = _extract_slot_start_iso(m)
-            if not st:
-                continue
-        
-            try:
-                st_dt = datetime.fromisoformat(st.replace("Z", "+00:00")).astimezone(pytz.UTC)
-            except Exception:
-                continue
-        
-            # Mejor: end exclusivo para ventanas [start, end)
-            if start_utc <= st_dt < end_utc:
-                slug = m.get("slug", "?")
-                print(f"[MATCH] {slug} start={st}")
+        # Debug útil
+        if page:
+            first = page[0].get("startDate")
+            last = page[-1].get("startDate")
+            print(f"[Gamma page offset={offset}] first={first} last={last} count={len(page)}")
+        else:
+            print(f"[Gamma page offset={offset}] empty")
+
+        # Filtra por la serie via slug prefix (robusto aunque Gamma no tenga seriesSlug como param)
+        for m in page:
+            slug = str(m.get("slug", ""))
+            if slug.startswith(slug_prefix):
                 out.append(m)
 
-        offset += limit
-        if offset >= cfg.max_markets:
+        # Paginación
+        if len(page) < limit:
             break
+        offset += limit
 
     return out
