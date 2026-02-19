@@ -74,7 +74,7 @@ def load_config() -> Config:
     price_down = float(_getenv("PRICE_DOWN", required=True))
     size_down = float(_getenv("SIZE_DOWN", required=True))
 
-    dry_run = _getenv("DRY_RUN", "true").lower() in ("1", "true", "yes", "y")
+    dry_run = _getenv("DRY_RUN", "true").strip().lower() in ("1", "true", "yes", "y")
     max_markets = int(_getenv("MAX_MARKETS", "200"))
 
     return Config(
