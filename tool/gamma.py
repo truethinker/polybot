@@ -58,6 +58,10 @@ def gamma_list_markets_for_series_in_window(cfg: Config) -> list[dict]:
         r.raise_for_status()
 
         markets = _safe_json(r)
+        if markets:
+            first_iso = _extract_slot_start_iso(markets[0])
+            last_iso = _extract_slot_start_iso(markets[-1])
+            print(f"[Gamma page offset={offset}] first={first_iso} last={last_iso} count={len(markets)}")
         if not isinstance(markets, list) or not markets:
             break
 
