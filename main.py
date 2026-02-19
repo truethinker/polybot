@@ -22,6 +22,11 @@ def main():
     print("========================================\n")
 
     markets = gamma_list_markets_for_series_in_window(cfg)
+    if markets:
+        m0 = markets[0]
+        print("DEBUG makerBaseFee:", m0.get("makerBaseFee"))
+        print("DEBUG orderPriceMinTickSize:", m0.get("orderPriceMinTickSize"))
+        print("DEBUG negRisk:", m0.get("negRisk"))
     if not markets:
         print("No encontré mercados en esa ventana.")
         return 0
