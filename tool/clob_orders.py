@@ -29,7 +29,13 @@ def _mk_client(cfg: Config) -> ClobClient:
         signature_type=cfg.signature_type,  # 0 MetaMask/EOA, 1 email/Magic, 2 proxy  [oai_citation:4‡GitHub](https://github.com/Polymarket/py-clob-client)
         #funder=cfg.funder_address,    # <- address que paga colateral
     )
-
+    from eth_account import Account
+    Account.enable_unaudited_hdwallet_features()
+    
+    addr = Account.from_key(cfg.private_key).address
+    print("SIGNER_ADDRESS:", addr)
+    print("FUNDER_ADDRESS:", getattr(cfg, "funder_address", None))
+    print("CHAIN_ID:", cfg.chain_id, "SIG_TYPE:", cfg.signature_type)
     # Si no quieres manejar CLOB_API_KEY/SECRET/PASSPHRASE a mano:
     # el SDK puede crearlos/derivarlos y setearlos.
     client.set_api_creds(client.create_or_derive_api_creds())  #  [oai_citation:5‡GitHub](https://github.com/Polymarket/py-clob-client)
