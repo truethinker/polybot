@@ -49,18 +49,17 @@ def _outcomes(market: dict) -> list[str]:
     return ["Up", "Down"]
 
 def _mk_client(cfg: Config) -> ClobClient:
-    """
-    CLOB base endpoint está documentado en Polymarket endpoints.  [oai_citation:3‡Polymarket](https://docs.polymarket.com/quickstart/reference/endpoints?utm_source=chatgpt.com)
-    """
     host = cfg.clob_host.rstrip("/")
+
     client = ClobClient(
         host=host,
         chain_id=POLYGON,
         private_key=cfg.private_key,
-        api_key=cfg.clob_api_key,
-        api_secret=cfg.clob_api_secret,
-        api_passphrase=cfg.clob_api_passphrase,
     )
+
+    # Deriva (o crea) credenciales API para endpoints autenticados
+    client.create_or_derive_api_key()
+
     return client
 
 def place_dual_orders_for_market(cfg: Config, market: dict) -> dict[str, Any]:
