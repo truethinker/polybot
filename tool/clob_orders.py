@@ -48,26 +48,26 @@ def _outcomes(market: dict) -> list[str]:
             pass
     return ["Up", "Down"]
 
-def _mk_client(cfg: Config) -> ClobClient:
-    host = cfg.clob_host.rstrip("/")
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import ApiCreds  # <-- importante
 
-    client = ClobClient(
-        host=host,
-        chain_id=POLYGON,
-        private_key=cfg.private_key,
+def _mk_client(cfg: Config) -> ClobClient:
+    api_creds = ApiCreds(
+        api_key=cfg.clob_api_key,
+        api_secret=cfg.clob_api_secret,
+        api_passphrase=cfg.clob_api_passphrase,
     )
 
-    # Deriva (o crea) credenciales API para endpoints autenticados
-    client.create_or_derive_api_key()
-
-    return client
+    return ClobClient(
+        host=cfg.clob_host.rstrip("/"),
+        chain_id=cfg.chain_id,
+        key=cfg.private_key,          # <-- el SDK actual usa 'key'
+        creds=api_creds,              # <-- L2
+        signature_type=cfg.signature_type,  # normalmente 1
+        funder=cfg.funder_address,    # <-- TU address que paga colateral
+    )
 
 def place_dual_orders_for_market(cfg: Config, market: dict) -> dict[str, Any]:
-    """
-    Pone 2 limit orders (Up y Down) para un market.
-    IMPORTANTE: aquí asumimos mapping outcomes[0]=Up, outcomes[1]=Down
-    que es lo habitual en estos 5m (y coincide con tu JSON). Ajustable.
-    """
     slug = market.get("slug", "?")
     if market.get("closed") is True:
         raise RuntimeError(f"Market cerrado: {slug}")
@@ -75,12 +75,7 @@ def place_dual_orders_for_market(cfg: Config, market: dict) -> dict[str, Any]:
         raise RuntimeError(f"Market no acepta órdenes: {slug}")
 
     token_ids = _parse_clob_token_ids(market)
-    outs = _outcomes(market)
-
-    # En tu JSON: outcomes ["Up","Down"] y clobTokenIds [UpToken, DownToken]
-    # Si algún día viniese invertido, aquí lo verás en logs y lo ajustamos.
-    token_up = token_ids[0]
-    token_down = token_ids[1]
+    token_up, token_down = token_ids[0], token_ids[1]
 
     if cfg.dry_run:
         return {
@@ -92,32 +87,17 @@ def place_dual_orders_for_market(cfg: Config, market: dict) -> dict[str, Any]:
 
     client = _mk_client(cfg)
 
-    # BUY = quieres comprar shares a ese precio.
-    # (Si quisieras “poner liquidez” de venta, sería Side.SELL.)
-    up_order = OrderArgs(
-        price=cfg.price_up,
-        size=cfg.size_up,
-        side="BUY",
-        token_id=token_up,
+    # tick_size / neg_risk: puedes hardcodear, o leerlo del market si lo traes
+    meta = {"tick_size": "0.01", "neg_risk": bool(market.get("negRisk", False))}
+
+    up_resp = client.create_and_post_order(
+        {"token_id": token_up, "price": cfg.price_up, "size": cfg.size_up, "side": "BUY"},
+        meta,
     )
 
-    down_order = OrderArgs(
-        price=cfg.price_down,
-        size=cfg.size_down,
-        side="BUY",
-        token_id=token_down,
+    down_resp = client.create_and_post_order(
+        {"token_id": token_down, "price": cfg.price_down, "size": cfg.size_down, "side": "BUY"},
+        meta,
     )
 
-    # create + post
-    signed_up = client.create_order(up_order, order_type=OrderType.GTC)
-    signed_down = client.create_order(down_order, order_type=OrderType.GTC)
-
-    up_resp = client.post_order(signed_up)
-    down_resp = client.post_order(signed_down)
-
-    return {
-        "slug": slug,
-        "up": {"token_id": token_up, "resp": up_resp},
-        "down": {"token_id": token_down, "resp": down_resp},
-        "outcomes": outs,
-    }
+    return {"slug": slug, "up": up_resp, "down": down_resp}
