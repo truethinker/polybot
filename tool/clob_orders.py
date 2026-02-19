@@ -57,17 +57,33 @@ def place_dual_orders_for_market(cfg: Config, market: dict) -> dict[str, Any]:
             "up": {"token_id": token_up, "price": cfg.price_up, "size": cfg.size_up},
             "down": {"token_id": token_down, "price": cfg.price_down, "size": cfg.size_down},
         }
+        
+    maker_fee_bps = _maker_fee_bps(market)
+    if maker_fee_bps <= 0:
+        raise RuntimeError(f"Market sin makerBaseFee válido: {slug} (maker_fee_bps={maker_fee_bps})")
 
     client = _mk_client(cfg)
 
-    up_order = OrderArgs(token_id=token_up, price=cfg.price_up, size=cfg.size_up, side=BUY)
-    down_order = OrderArgs(token_id=token_down, price=cfg.price_down, size=cfg.size_down, side=BUY)
-
+    up_order = {
+        "token_id": token_up,
+        "price": cfg.price_up,
+        "size": cfg.size_up,
+        "side": "BUY",
+        "fee_rate_bps": maker_fee_bps,
+    }
+    down_order = {
+        "token_id": token_down,
+        "price": cfg.price_down,
+        "size": cfg.size_down,
+        "side": "BUY",
+        "fee_rate_bps": maker_fee_bps,
+    }
+    
+    up_resp = client.create_and_post_order(up_order, meta)
+    down_resp = client.create_and_post_order(down_order, meta)
+    
     signed_up = client.create_order(up_order)
     signed_down = client.create_order(down_order)
-
-    up_resp = client.post_order(signed_up, OrderType.GTC)
-    down_resp = client.post_order(signed_down, OrderType.GTC)
 
     return {"slug": slug, "up": up_resp, "down": down_resp}
 
@@ -84,5 +100,18 @@ def _outcomes(market: dict) -> list[str]:
         except Exception:
             pass
     return ["Up", "Down"]
+    
+def _tick_size(market: dict) -> str:
+    # Gamma suele traer el tick mínimo aquí
+    v = market.get("orderPriceMinTickSize") or market.get("tick_size") or "0.01"
+    return str(v)
+
+def _maker_fee_bps(market: dict) -> int:
+    # En tu JSON venía makerBaseFee=1000
+    v = market.get("makerBaseFee") or market.get("maker_base_fee") or 0
+    try:
+        return int(v)
+    except Exception:
+        return 0
 
 
