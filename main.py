@@ -2,6 +2,9 @@ import os
 import sys
 from dotenv import load_dotenv
 
+import os
+os.environ["PYTHONUNBUFFERED"] = "1"
+
 from tool.config import load_config
 from tool.gamma import gamma_list_markets_for_series_in_window
 from tool.clob_orders import place_dual_orders_for_market
