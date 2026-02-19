@@ -62,7 +62,7 @@ def load_config() -> Config:
     clob_host = _getenv("CLOB_HOST", "https://clob.polymarket.com")
 
     funder_address = _getenv("FUNDER_ADDRESS", required=True)
-    signature_type = int(_getenv("SIGNATURE_TYPE", "1"))
+    signature_type = int(_getenv("SIGNATURE_TYPE", "0"))
 
     private_key = _getenv("PRIVATE_KEY", required=True)
     clob_api_key = _getenv("CLOB_API_KEY", required=True)
