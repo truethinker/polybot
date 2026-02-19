@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, OrderType, Side
+from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.constants import POLYGON
 
 from tool.config import Config
@@ -97,14 +97,14 @@ def place_dual_orders_for_market(cfg: Config, market: dict) -> dict[str, Any]:
     up_order = OrderArgs(
         price=cfg.price_up,
         size=cfg.size_up,
-        side=Side.BUY,
+        side="BUY",
         token_id=token_up,
     )
 
     down_order = OrderArgs(
         price=cfg.price_down,
         size=cfg.size_down,
-        side=Side.BUY,
+        side="BUY",
         token_id=token_down,
     )
 
