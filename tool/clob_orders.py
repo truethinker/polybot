@@ -64,6 +64,27 @@ def place_dual_orders_for_market(cfg: Config, market: dict) -> dict[str, Any]:
 
     client = _mk_client(cfg)
 
+    maker_fee_bps = int(market.get("makerBaseFee", 0))
+    tick_size = market.get("orderPriceMinTickSize", "0.01")
+    
+    meta = {
+        "tick_size": str(tick_size),
+        "neg_risk": bool(market.get("negRisk", False)),
+        "fee_rate_bps": maker_fee_bps,
+    }
+    
+    up_resp = client.create_and_post_order(
+        {"token_id": token_up, "price": cfg.price_up, "size": cfg.size_up, "side": "BUY"},
+        meta,
+    )
+    
+    down_resp = client.create_and_post_order(
+        {"token_id": token_down, "price": cfg.price_down, "size": cfg.size_down, "side": "BUY"},
+        meta,
+    )
+    
+    return {"slug": slug, "up": up_resp, "down": down_resp}
+
     up_order = {
         "token_id": token_up,
         "price": cfg.price_up,
@@ -78,9 +99,6 @@ def place_dual_orders_for_market(cfg: Config, market: dict) -> dict[str, Any]:
         "side": "BUY",
         "fee_rate_bps": maker_fee_bps,
     }
-    
-    up_resp = client.create_and_post_order(up_order, meta)
-    down_resp = client.create_and_post_order(down_order, meta)
     
     signed_up = client.create_order(up_order)
     signed_down = client.create_order(down_order)
