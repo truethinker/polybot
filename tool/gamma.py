@@ -1,5 +1,4 @@
 import requests
-
 from tool.config import Config
 
 
@@ -13,14 +12,14 @@ def _safe_json(resp: requests.Response):
 def gamma_list_markets_for_series_in_window(cfg: Config) -> list[dict]:
     """
     Pide a Gamma SOLO markets cuyo startDate cae dentro de la ventana (UTC),
-    ordenados por startDate asc. Luego filtra por la serie mediante slug prefix.
+    ordenados por startDate asc. Filtra por prefix de slug para esta serie.
     """
     url = f"{cfg.gamma_host.rstrip('/')}/markets"
 
     start_min = cfg.window_start_utc_iso()
     start_max = cfg.window_end_utc_iso()
 
-    # Para esta serie BTC 5m, el slug real de market suele empezar por:
+    # Prefix observado para esta serie 5m:
     slug_prefix = "btc-updown-5m-"
 
     out: list[dict] = []
