@@ -1,7 +1,20 @@
 import os
+import sys
+from pathlib import Path
+
+# Ensure local imports work regardless of the runtime working directory
+ROOT = Path(__file__).resolve().parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 os.environ["PYTHONUNBUFFERED"] = "1"
 
-from dotenv import load_dotenv
+try:
+    # Optional; requirements.txt should install it, but don't crash if the platform skips deps.
+    from dotenv import load_dotenv
+except Exception:  # pragma: no cover
+    def load_dotenv(*_args, **_kwargs):
+        return False
 
 from tool.config import load_config
 from tool.gamma import gamma_list_markets_for_series_in_window
