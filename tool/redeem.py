@@ -122,6 +122,15 @@ def redeem_last_hours(cfg: Config, lookback_hours: int, anchor_utc: datetime | N
             print("[redeem] trying get_trades()")
             resp = client.get_trades()
             # resp puede ser list o dict con 'data'
+            print(f"[redeem] sample trade keys: {sorted(list(trades[0].keys())) if trades else 'NO_TRADES'}")
+
+            # imprime los 5 primeros trades con solo campos de tiempo potenciales
+            time_keys = ["timestamp","createdAt","created_at","time","t","tradeTime","blockTimestamp","updatedAt","updated_at"]
+            for i, tr in enumerate(trades[:5]):
+                print(f"[redeem] trade[{i}] time fields:")
+                for k in time_keys:
+                    if k in tr:
+                        print(f"   - {k}: {tr.get(k)}")
             if isinstance(resp, list):
                 items = resp
             elif isinstance(resp, dict):
