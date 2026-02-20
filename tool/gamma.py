@@ -12,16 +12,18 @@ def _safe_json(resp: requests.Response):
 def gamma_list_markets_for_series_in_window(cfg: Config) -> list[dict]:
     """
     Pide a Gamma SOLO markets cuyo startDate cae dentro de la ventana (UTC),
-    ordenados por startDate asc. Luego filtra por la serie via slug prefix.
-
-    Nota: en BTC 5m los slugs suelen ser "btc-updown-5m-<timestamp>".
+    ordenados por startDate asc. Luego filtra por prefix de slug (robusto).
     """
     url = f"{cfg.gamma_host.rstrip('/')}/markets"
 
     start_min = cfg.window_start_utc_iso()
     start_max = cfg.window_end_utc_iso()
 
-    slug_prefix = "btc-updown-5m-"
+    # robustez: evita 422 si están invertidos
+    if start_max <= start_min:
+        raise RuntimeError("Ventana UTC inválida (start_date_max <= start_date_min). Revisa WINDOW_START/WINDOW_END.")
+
+    slug_prefix = "btc-updown-5m-"  # para esta serie
 
     out: list[dict] = []
     offset = 0
@@ -40,9 +42,11 @@ def gamma_list_markets_for_series_in_window(cfg: Config) -> list[dict]:
         }
 
         r = requests.get(url, params=params, timeout=30)
+        if r.status_code == 422:
+            raise RuntimeError(f"Gamma 422: revisa ventana. url={r.url}")
         r.raise_for_status()
-        page = _safe_json(r)
 
+        page = _safe_json(r)
         if not isinstance(page, list):
             raise RuntimeError(f"Respuesta Gamma inesperada: {type(page)}")
 
