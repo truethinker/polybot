@@ -20,20 +20,22 @@ def main():
     print(f"DRY_RUN={cfg.dry_run}")
     print(f"FUNDER_ADDRESS={cfg.funder_address}")
     print(f"CHAIN_ID={cfg.chain_id} SIGNATURE_TYPE={cfg.signature_type}")
+    print(f"USE_DERIVED_CREDS={cfg.use_derived_creds}")
     print("========================================\n")
 
     markets = gamma_list_markets_for_series_in_window(cfg)
 
+    if markets:
+        m0 = markets[0]
+        print("[DEBUG first market]")
+        print("DEBUG makerBaseFee:", m0.get("makerBaseFee"))
+        print("DEBUG orderPriceMinTickSize:", m0.get("orderPriceMinTickSize"))
+        print("DEBUG negRisk:", m0.get("negRisk"))
+        print()
+
     if not markets:
         print("No encontré mercados en esa ventana.")
         return 0
-
-    m0 = markets[0]
-    print("[DEBUG first market]")
-    print("DEBUG makerBaseFee:", m0.get("makerBaseFee"))
-    print("DEBUG orderPriceMinTickSize:", m0.get("orderPriceMinTickSize"))
-    print("DEBUG negRisk:", m0.get("negRisk"))
-    print()
 
     print(f"Encontrados {len(markets)} markets en ventana (cap MAX_MARKETS={cfg.max_markets}).\n")
 
