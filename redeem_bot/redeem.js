@@ -113,11 +113,43 @@ function positionTimestamp(pos) {
 }
 
 async function fetchPositions() {
-  // Data API: posiciones por address. Si esta ruta cambia, se ajusta aquí.
-  const url = `${dataApiUrl.replace(/\/$/, "")}/positions?user=${FUNDER_ADDRESS}`;
-  const { data } = await axios.get(url, { timeout: 30_000 });
-  if (!Array.isArray(data)) throw new Error(`Unexpected positions payload: ${typeof data}`);
-  return data;
+  // Data API (documentado):
+  //   GET /positions?user=0x..&redeemable=true&sizeThreshold=0&limit=...&offset=...
+  // Nota: aunque pidamos redeemable=true, algunos deployments devuelven posiciones con distintos
+  // campos (redeemable/redeemableValue/isRedeemable). Por eso filtramos también client-side.
+
+  const base = `${dataApiUrl.replace(/\/$/, "")}/positions`;
+  const limit = 500;
+  let offset = 0;
+  let out = [];
+
+  while (true) {
+    const url = `${base}?user=${FUNDER_ADDRESS}`
+      + `&redeemable=true`
+      + `&sizeThreshold=0`
+      + `&limit=${limit}`
+      + `&offset=${offset}`;
+
+    const { data } = await axios.get(url, { timeout: 30_000 });
+    if (!Array.isArray(data)) {
+      throw new Error(`Unexpected positions payload: ${typeof data} (url=${base})`);
+    }
+
+    if (offset === 0) {
+      const keys = data?.[0] ? Object.keys(data[0]).slice(0, 30) : [];
+      console.log(`[positions] page0 count=${data.length} sampleKeys=${keys.join(",")}`);
+    } else {
+      console.log(`[positions] offset=${offset} count=${data.length}`);
+    }
+
+    out = out.concat(data);
+    if (data.length < limit) break;
+    offset += limit;
+    // safety cap
+    if (offset > 5000) break;
+  }
+
+  return out;
 }
 
 function toUsd(pos) {
@@ -146,6 +178,7 @@ function pickRedeemables(positions) {
       indexSet: p.indexSet || p.index_set || p.index,
       redeemableUsd: toUsd(p),
       ts: positionTimestamp(p)?.toISOString(),
+      marketSlug: p.marketSlug || p.slug || p.market || p.marketId,
     }))
     .filter((x) => x.conditionId && x.indexSet);
 }
@@ -166,14 +199,18 @@ async function main() {
   const redeemables = pickRedeemables(positions);
 
   if (redeemables.length === 0) {
-    console.log("No hay posiciones redeemables.");
+    console.log(
+      "No hay posiciones redeemables en Data API (o no hay shares en wallet para redeem). " +
+        "OJO: si compraste en CLOB, es posible que las shares estén en el exchange y necesites WITHDRAW a tu wallet antes de poder hacer redeem."
+    );
     return;
   }
 
   console.log(`Encontradas ${redeemables.length} posiciones redeemables (últimas ~${lookbackHours}h):`);
   for (const r of redeemables) {
     const t = r.ts ? ` ts=${r.ts}` : "";
-    console.log(`- conditionId=${r.conditionId} indexSet=${r.indexSet} redeemableUsd~${r.redeemableUsd}${t}`);
+    const s = r.marketSlug ? ` slug=${r.marketSlug}` : "";
+    console.log(`- conditionId=${r.conditionId} indexSet=${r.indexSet} redeemableUsd~${r.redeemableUsd}${t}${s}`);
   }
 
   if (dryRun) {
