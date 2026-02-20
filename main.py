@@ -48,8 +48,23 @@ def main():
         print("DEBUG negRisk:", m0.get("negRisk"))
         print()
 
+    # 1) Redeem (si está activado) SIEMPRE, haya o no haya markets en la ventana
+    auto_redeem = os.getenv("AUTO_REDEEM", "false").strip().lower() in ("1", "true", "yes", "y")
+    print(f"AUTO_REDEEM={auto_redeem}", flush=True)
+    
+    if auto_redeem:
+        try:
+            from tool.redeem import redeem_last_hours
+            lookback_h = int(os.getenv("REDEEM_LOOKBACK_HOURS", "12"))
+            print(f"[redeem] lookback_hours={lookback_h}", flush=True)
+            redeem_last_hours(cfg, lookback_h)
+        except Exception as e:
+            print(f"[redeem][FAIL] {e}", flush=True)
+    
+    # 2) Luego ya haces trading (si quieres)
+    markets = gamma_list_markets_for_series_in_window(cfg)
     if not markets:
-        print("No encontré mercados en esa ventana.")
+        print("No encontré mercados en esa ventana.", flush=True)
         return 0
 
     print(f"Encontrados {len(markets)} markets en ventana (cap MAX_MARKETS={cfg.max_markets}).\n")
@@ -70,11 +85,6 @@ def main():
     print(f"OK: {ok}")
     print(f"FAIL: {fail}")
     return 0 if fail == 0 else 1
-
-
-    auto_redeem = os.getenv("AUTO_REDEEM", "false").lower() in ("1","true","yes","y")
-    if auto_redeem:
-        redeem_recent(cfg)   # o como se llame tu función
 
 if __name__ == "__main__":
     raise SystemExit(main())
