@@ -1,3 +1,5 @@
+print(">>> RUNNING BUILD: REDEEM-LOOKBACK12H-V2 <<<", flush=True)
+
 import os
 import sys
 from pathlib import Path
