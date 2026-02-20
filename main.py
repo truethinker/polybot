@@ -72,5 +72,9 @@ def main():
     return 0 if fail == 0 else 1
 
 
+    auto_redeem = os.getenv("AUTO_REDEEM", "false").lower() in ("1","true","yes","y")
+    if auto_redeem:
+        redeem_recent(cfg)   # o como se llame tu función
+
 if __name__ == "__main__":
     raise SystemExit(main())
