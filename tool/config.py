@@ -1,8 +1,6 @@
 import os
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
-
 import pytz
 
 
@@ -11,16 +9,18 @@ class Config:
     gamma_host: str
     clob_host: str
 
+    # trading identity
     funder_address: str
     signature_type: int
     chain_id: int
 
+    # signer
     private_key: str
 
-    # L2 creds (opcionales; si no están, derivamos en runtime)
-    clob_api_key: Optional[str]
-    clob_api_secret: Optional[str]
-    clob_api_passphrase: Optional[str]
+    # optional manual api creds (recommended: derive)
+    clob_api_key: str | None
+    clob_api_secret: str | None
+    clob_api_passphrase: str | None
 
     series_slug: str
 
@@ -42,7 +42,6 @@ class Config:
         return pytz.timezone("Europe/Madrid")
 
     def parse_local_dt(self, s: str) -> datetime:
-        # Input: "YYYY-MM-DDTHH:MM:SS" in Europe/Madrid
         naive = datetime.fromisoformat(s)
         return self.tz.localize(naive)
 
@@ -57,37 +56,39 @@ class Config:
 
 def _getenv(name: str, default: str | None = None, required: bool = False) -> str | None:
     v = os.getenv(name, default)
-    if v is None:
-        if required:
-            raise RuntimeError(f"Falta variable de entorno requerida: {name}")
-        return None
-    if isinstance(v, str):
-        v = v.strip()
-    if required and (v is None or v == ""):
+    if required and (v is None or str(v).strip() == ""):
         raise RuntimeError(f"Falta variable de entorno requerida: {name}")
-    return v
+    if v is None:
+        return None
+    return v.strip() if isinstance(v, str) else v
 
 
 def load_config() -> Config:
-    gamma_host = _getenv("GAMMA_HOST", "https://gamma-api.polymarket.com")  # Gamma
-    clob_host = _getenv("CLOB_HOST", "https://clob.polymarket.com")         # CLOB
+    gamma_host = _getenv("GAMMA_HOST", "https://gamma-api.polymarket.com") or "https://gamma-api.polymarket.com"
+    clob_host = _getenv("CLOB_HOST", "https://clob.polymarket.com") or "https://clob.polymarket.com"
+
+    funder_address = _getenv("FUNDER_ADDRESS", required=True)  # address that holds funds
+    signature_type = int(_getenv("SIGNATURE_TYPE", "1") or "1")
+    chain_id = int(_getenv("CHAIN_ID", "137") or "137")
 
     private_key = _getenv("PRIVATE_KEY", required=True)
-    funder_address = _getenv("FUNDER_ADDRESS", required=True)
 
-    # En tus logs probaste 0 y 1; en general 1 suele ser lo correcto.
-    signature_type = int(_getenv("SIGNATURE_TYPE", "1"))
-    chain_id = int(_getenv("CHAIN_ID", "137"))
+    # Manual creds OPTIONAL (we will derive if missing)
+    clob_api_key = _getenv("CLOB_API_KEY", None)
+    clob_api_secret = _getenv("CLOB_API_SECRET", None)
+    clob_api_passphrase = _getenv("CLOB_API_PASSPHRASE", None)
 
-    # L2 creds opcionales
-    clob_api_key = _getenv("CLOB_API_KEY", None, required=False)
-    clob_api_secret = _getenv("CLOB_API_SECRET", None, required=False)
-    clob_api_passphrase = _getenv("CLOB_API_PASSPHRASE", None, required=False)
-
-    series_slug = _getenv("SERIES_SLUG", "btc-up-or-down-5m")
+    series_slug = _getenv("SERIES_SLUG", "btc-up-or-down-5m") or "btc-up-or-down-5m"
 
     window_start = _getenv("WINDOW_START", required=True)
     window_end = _getenv("WINDOW_END", required=True)
+
+    # Validate window ordering (LOCAL time)
+    tz = pytz.timezone("Europe/Madrid")
+    ws = tz.localize(datetime.fromisoformat(window_start))
+    we = tz.localize(datetime.fromisoformat(window_end))
+    if we <= ws:
+        raise RuntimeError("WINDOW_END debe ser posterior a WINDOW_START (hora local Europe/Madrid).")
 
     price_up = float(_getenv("PRICE_UP", required=True))
     size_up = float(_getenv("SIZE_UP", required=True))
@@ -95,11 +96,11 @@ def load_config() -> Config:
     size_down = float(_getenv("SIZE_DOWN", required=True))
 
     dry_run = (_getenv("DRY_RUN", "true") or "true").strip().lower() in ("1", "true", "yes", "y")
-    max_markets = int(_getenv("MAX_MARKETS", "200"))
+    max_markets = int(_getenv("MAX_MARKETS", "200") or "200")
 
-    cfg = Config(
-        gamma_host=gamma_host or "https://gamma-api.polymarket.com",
-        clob_host=clob_host or "https://clob.polymarket.com",
+    return Config(
+        gamma_host=gamma_host,
+        clob_host=clob_host,
         funder_address=funder_address,
         signature_type=signature_type,
         chain_id=chain_id,
@@ -117,9 +118,3 @@ def load_config() -> Config:
         dry_run=dry_run,
         max_markets=max_markets,
     )
-
-    # Validación ventana (en hora local)
-    if cfg.parse_local_dt(cfg.window_end_local) <= cfg.parse_local_dt(cfg.window_start_local):
-        raise RuntimeError("WINDOW_END debe ser posterior a WINDOW_START (hora local Europe/Madrid).")
-
-    return cfg
