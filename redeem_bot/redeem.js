@@ -75,11 +75,41 @@ const dryRun = String(DRY_RUN || "false").toLowerCase() in {
 
 const minRedeemableUsd = Number(MIN_REDEEMABLE_USD || "0");
 
+// Sólo procesar posiciones recientes (por defecto: últimas 12h)
+const lookbackHours = Number(process.env.LOOKBACK_HOURS || "12");
+
 const pk = PRIVATE_KEY.startsWith("0x") ? PRIVATE_KEY : `0x${PRIVATE_KEY}`;
 const signer = new ethers.Wallet(pk);
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function parseIsoMaybe(v) {
+  if (!v) return null;
+  try {
+    const d = new Date(v);
+    if (Number.isNaN(d.getTime())) return null;
+    return d;
+  } catch {
+    return null;
+  }
+}
+
+function positionTimestamp(pos) {
+  // Best-effort: distintos endpoints/versiones pueden usar nombres distintos
+  return (
+    parseIsoMaybe(pos.resolvedAt) ||
+    parseIsoMaybe(pos.marketEndTime) ||
+    parseIsoMaybe(pos.eventEndTime) ||
+    parseIsoMaybe(pos.endTime) ||
+    parseIsoMaybe(pos.marketStartTime) ||
+    parseIsoMaybe(pos.eventStartTime) ||
+    parseIsoMaybe(pos.startTime) ||
+    parseIsoMaybe(pos.startDate) ||
+    parseIsoMaybe(pos.createdAt) ||
+    parseIsoMaybe(pos.updatedAt)
+  );
 }
 
 async function fetchPositions() {
@@ -99,15 +129,23 @@ function toUsd(pos) {
 
 function pickRedeemables(positions) {
   // Heurística: pos.redeemable > 0 o pos.isRedeemable === true
+  const cutoff = new Date(Date.now() - lookbackHours * 60 * 60 * 1000);
   return positions
     .filter((p) => {
       const r = toUsd(p);
-      return (p?.isRedeemable === true || r > 0) && r >= minRedeemableUsd;
+      if (!((p?.isRedeemable === true || r > 0) && r >= minRedeemableUsd)) return false;
+
+      // Filtro temporal: si podemos inferir timestamp y es más antiguo que el cutoff, ignoramos.
+      // Si NO podemos inferir timestamp, lo dejamos pasar (mejor cobrar que perder).
+      const ts = positionTimestamp(p);
+      if (!ts) return true;
+      return ts >= cutoff;
     })
     .map((p) => ({
       conditionId: p.conditionId || p.condition_id || p.condition,
       indexSet: p.indexSet || p.index_set || p.index,
       redeemableUsd: toUsd(p),
+      ts: positionTimestamp(p)?.toISOString(),
     }))
     .filter((x) => x.conditionId && x.indexSet);
 }
@@ -122,6 +160,7 @@ async function main() {
   console.log(`collateralToken=${collateralTokenAddress}`);
   console.log(`dryRun=${dryRun}`);
   console.log(`minRedeemableUsd=${minRedeemableUsd}`);
+  console.log(`lookbackHours=${lookbackHours}`);
 
   const positions = await fetchPositions();
   const redeemables = pickRedeemables(positions);
@@ -131,9 +170,10 @@ async function main() {
     return;
   }
 
-  console.log(`Encontradas ${redeemables.length} posiciones redeemables:`);
+  console.log(`Encontradas ${redeemables.length} posiciones redeemables (últimas ~${lookbackHours}h):`);
   for (const r of redeemables) {
-    console.log(`- conditionId=${r.conditionId} indexSet=${r.indexSet} redeemableUsd~${r.redeemableUsd}`);
+    const t = r.ts ? ` ts=${r.ts}` : "";
+    console.log(`- conditionId=${r.conditionId} indexSet=${r.indexSet} redeemableUsd~${r.redeemableUsd}${t}`);
   }
 
   if (dryRun) {
