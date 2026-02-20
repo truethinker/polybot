@@ -1,49 +1,10 @@
 from __future__ import annotations
-
 from typing import Any
-import inspect
-import json
 
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds, OrderArgs, OrderType, CreateOrderOptions
 
 from tool.config import Config
-
-
-def _apply_py_clob_client_hmac_patch() -> None:
-    """
-    Parche runtime para el bug del issue #249:
-    build_hmac_signature() doble-encodeaba body si ya era JSON string y eso rompe L2 => 401.
-    Fuente: issue #249.  [oai_citation:2‡GitHub](https://github.com/Polymarket/py-clob-client/issues/249)
-    """
-    try:
-        from py_clob_client.signing import hmac as hmac_mod
-    except Exception:
-        return
-
-    if getattr(hmac_mod, "__patched_no_double_encode__", False):
-        return
-
-    orig = getattr(hmac_mod, "build_hmac_signature", None)
-    if orig is None:
-        return
-
-    def build_hmac_signature_fixed(secret: str, method: str, request_path: str, body: Any | None, timestamp: str) -> str:
-        import hmac
-        import hashlib
-
-        message = f"{timestamp}{method.upper()}{request_path}"
-        if body:
-            if isinstance(body, str):
-                message += body
-            else:
-                message += json.dumps(body, separators=(",", ":"))
-
-        sig = hmac.new(secret.encode("utf-8"), message.encode("utf-8"), hashlib.sha256).hexdigest()
-        return sig
-
-    hmac_mod.build_hmac_signature = build_hmac_signature_fixed  # type: ignore
-    hmac_mod.__patched_no_double_encode__ = True
 
 
 def _parse_clob_token_ids(market: dict) -> list[str]:
@@ -57,6 +18,7 @@ def _parse_clob_token_ids(market: dict) -> list[str]:
     if isinstance(v, str):
         s = v.strip()
         if s.startswith("[") and s.endswith("]"):
+            import json
             arr = json.loads(s)
             if not isinstance(arr, list) or len(arr) < 2:
                 raise RuntimeError("clobTokenIds no tiene 2 elementos")
@@ -65,65 +27,41 @@ def _parse_clob_token_ids(market: dict) -> list[str]:
     raise RuntimeError(f"Formato clobTokenIds inesperado: {type(v)}")
 
 
-def _mk_client(cfg: Config) -> ClobClient:
-    _apply_py_clob_client_hmac_patch()
+def _tick_size(market: dict) -> str:
+    return str(market.get("orderPriceMinTickSize") or market.get("tick_size") or "0.01")
 
-    client = ClobClient(
+
+def _maker_fee_bps(market: dict) -> int:
+    v = market.get("makerBaseFee") or market.get("maker_base_fee") or 0
+    try:
+        return int(v)
+    except Exception:
+        return 0
+
+
+def _mk_client(cfg: Config) -> ClobClient:
+    api_creds = ApiCreds(
+        api_key=cfg.clob_api_key,
+        api_secret=cfg.clob_api_secret,
+        api_passphrase=cfg.clob_api_passphrase,
+    )
+
+    # Nota: el SDK actual usa key=..., creds=..., signature_type=..., funder=...
+    # USE_DERIVED_CREDS depende de versión; lo pasamos solo si existe el param
+    kwargs = dict(
         host=cfg.clob_host.rstrip("/"),
         chain_id=cfg.chain_id,
-        key=cfg.private_key,              # SDK actual usa 'key'
+        key=cfg.private_key,
+        creds=api_creds,
         signature_type=cfg.signature_type,
         funder=cfg.funder_address,
     )
 
-    # Set creds
-    if cfg.use_derived_creds:
-        # Esto crea o deriva las creds L2 desde tu key (y las setea)
-        derived = client.create_or_derive_api_creds()
-        client.set_api_creds(derived)
-    else:
-        api_creds = ApiCreds(
-            api_key=cfg.clob_api_key,
-            api_secret=cfg.clob_api_secret,
-            api_passphrase=cfg.clob_api_passphrase,
-        )
-        client.set_api_creds(api_creds)
-
-    return client
-
-
-def _create_order_compat(client: ClobClient, order: OrderArgs, tick_size: str, neg_risk: bool):
-    """
-    Wrapper: distintas versiones del SDK cambian la firma de create_order().
-    Intentamos varios patrones.
-    """
-    opts = CreateOrderOptions(tick_size=tick_size, neg_risk=neg_risk)
-
-    # Intento 1 (tu forma actual): create_order(order, OrderType.GTC, opts)
     try:
-        return client.create_order(order, OrderType.GTC, opts)
+        return ClobClient(**kwargs, use_derived_creds=cfg.use_derived_creds)  # type: ignore
     except TypeError:
-        pass
-
-    # Intento 2: create_order(order, opts) (sin OrderType)
-    try:
-        return client.create_order(order, opts)
-    except TypeError:
-        pass
-
-    # Intento 3: create_order(order) (mínimo)
-    return client.create_order(order)
-
-
-def _post_order_compat(client: ClobClient, signed_order: Any):
-    """
-    Wrapper: distintas versiones del SDK cambian la firma de post_order().
-    """
-    try:
-        return client.post_order(signed_order)
-    except TypeError:
-        # Algunas versiones piden orderType separado
-        return client.post_order(signed_order, OrderType.GTC)
+        # si tu versión no acepta use_derived_creds
+        return ClobClient(**kwargs)
 
 
 def place_dual_orders_for_market(cfg: Config, market: dict) -> dict[str, Any]:
@@ -136,9 +74,9 @@ def place_dual_orders_for_market(cfg: Config, market: dict) -> dict[str, Any]:
 
     token_up, token_down = _parse_clob_token_ids(market)[0:2]
 
-    tick_size = str(market.get("orderPriceMinTickSize", "0.01"))
+    tick_size = _tick_size(market)
     neg_risk = bool(market.get("negRisk", False))
-    maker_fee_bps = int(market.get("makerBaseFee", 0))  # en tu debug: 1000
+    maker_fee_bps = _maker_fee_bps(market)
 
     if cfg.dry_run:
         return {
@@ -151,6 +89,10 @@ def place_dual_orders_for_market(cfg: Config, market: dict) -> dict[str, Any]:
 
     client = _mk_client(cfg)
 
+    # opciones de orden (tick + negRisk)
+    opts = CreateOrderOptions(tick_size=tick_size, neg_risk=neg_risk)
+
+    # fee_rate_bps: debe coincidir con el maker fee del market (tu debug: 1000)
     up_order = OrderArgs(
         token_id=token_up,
         price=cfg.price_up,
@@ -166,11 +108,11 @@ def place_dual_orders_for_market(cfg: Config, market: dict) -> dict[str, Any]:
         fee_rate_bps=maker_fee_bps,
     )
 
-    signed_up = _create_order_compat(client, up_order, tick_size, neg_risk)
-    signed_down = _create_order_compat(client, down_order, tick_size, neg_risk)
+    signed_up = client.create_order(up_order, OrderType.GTC, opts)
+    signed_down = client.create_order(down_order, OrderType.GTC, opts)
 
-    up_resp = _post_order_compat(client, signed_up)
-    down_resp = _post_order_compat(client, signed_down)
+    up_resp = client.post_order(signed_up)
+    down_resp = client.post_order(signed_down)
 
     return {
         "slug": slug,
