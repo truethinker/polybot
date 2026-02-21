@@ -34,6 +34,12 @@ def main():
         except Exception as e:
             print(f"[redeem][FAIL] {e}", flush=True)
 
+    if cfg.auto_redeem:
+    try:
+        from tool.redeem import redeem_last_hours
+        redeem_last_hours(cfg, cfg.redeem_lookback_hours)
+    except Exception as e:
+        print(f"[redeem][FAIL] {e}")
     # 2) TRADING (si hay markets)
     markets = gamma_list_markets_for_series_in_window(cfg)
 
