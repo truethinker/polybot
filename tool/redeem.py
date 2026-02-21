@@ -62,6 +62,14 @@ def _to_utc_dt(v) -> datetime | None:
 
 
 def _trade_time_value(tr: dict):
+    """
+    Extrae el campo correcto de tiempo en trades CLOB.
+    En tu payload real el campo es 'match_time'.
+    """
+    if "match_time" in tr:
+        return tr.get("match_time")
+
+    # fallback por si cambia en el futuro
     for k in (
         "created_at",
         "createdAt",
@@ -72,11 +80,12 @@ def _trade_time_value(tr: dict):
         "blockTimestamp",
         "updatedAt",
         "updated_at",
+        "last_update",
     ):
         if k in tr:
             return tr.get(k)
-    return None
 
+    return None
 
 def _anchor_end_utc(cfg: Config) -> datetime:
     try:
