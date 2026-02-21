@@ -9,7 +9,7 @@ def _safe_json(resp: requests.Response):
         raise RuntimeError(f"Gamma no devolvió JSON. Status={resp.status_code}, body={resp.text[:300]}")
 
 
-def gamma_list_markets_for_series_in_window(cfg: Config) -> list[dict]:
+def gamma_list_markets_for_series_in_window(cfg: Config, *, closed: str | None = "false") -> list[dict]:
     """
     Pide a Gamma SOLO markets cuyo startDate cae dentro de la ventana (UTC),
     ordenados por startDate asc. Luego filtra por la serie via slug prefix.
@@ -33,7 +33,9 @@ def gamma_list_markets_for_series_in_window(cfg: Config) -> list[dict]:
             "offset": offset,
             "order": "startDate",
             "ascending": "true",
-            "closed": "false",
+            # For order placement we want open markets (closed=false).
+            # For redeem we may want already-closed markets, so caller can override.
+            **({"closed": closed} if closed is not None else {}),
             "archived": "false",
             "start_date_min": start_min,
             "start_date_max": start_max,

@@ -99,20 +99,20 @@ def _create_order_compat(client: ClobClient, order: OrderArgs, tick_size: str, n
     """
     opts = CreateOrderOptions(tick_size=tick_size, neg_risk=neg_risk)
 
-    # Intento 1 (SDK newer): create_order(order, opts)
+    # Intento 1 (tu forma actual): create_order(order, OrderType.GTC, opts)
+    try:
+        return client.create_order(order, OrderType.GTC, opts)
+    except TypeError:
+        pass
+
+    # Intento 2: create_order(order, opts) (sin OrderType)
     try:
         return client.create_order(order, opts)
     except TypeError:
         pass
 
-    # Intento 2: create_order(order) (mínimo)
-    try:
-        return client.create_order(order)
-    except TypeError:
-        pass
-
-    # Intento 3 (SDK older): create_order(order, OrderType.GTC, opts)
-    return client.create_order(order, OrderType.GTC, opts)
+    # Intento 3: create_order(order) (mínimo)
+    return client.create_order(order)
 
 
 def _post_order_compat(client: ClobClient, signed_order: Any):
