@@ -91,7 +91,7 @@ def _anchor_end_utc(cfg: Config) -> datetime:
 # MAIN REDEEM FUNCTION
 # ==============================
 
-def redeem_last_hours(cfg: Config):
+def redeem_last_hours(cfg: Config, *_args, **_kwargs):
     print("[redeem] START")
 
     lookback_hours = cfg.redeem_lookback_hours
