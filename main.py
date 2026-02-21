@@ -1,61 +1,55 @@
 import os
 os.environ["PYTHONUNBUFFERED"] = "1"
 
+# `python-dotenv` is useful locally, but some deployment environments don't
+# install it. Make it optional.
+try:
+    from dotenv import load_dotenv  # type: ignore
+except Exception:  # pragma: no cover
+    load_dotenv = None
+
 from tool.config import load_config
 from tool.gamma import gamma_list_markets_for_series_in_window
 from tool.clob_orders import place_dual_orders_for_market
+from tool.redeem import maybe_auto_redeem
+
 
 def main():
-    print(">>> MAIN.PY LOADED: REDEEM CHECKPOINT v1 <<<", flush=True)
+    if load_dotenv is not None:
+        load_dotenv()
 
     cfg = load_config()
 
-    auto_redeem = os.getenv("AUTO_REDEEM", "false").strip().lower() in ("1", "true", "yes", "y")
-    lookback_h = int(os.getenv("REDEEM_LOOKBACK_HOURS", "12"))
+    print("=== Polymarket 5m BTC Slot Order Tool ===")
+    print(f"Series: {cfg.series_slug}")
+    print(f"Window (Europe/Madrid): {cfg.window_start_local} -> {cfg.window_end_local}")
+    print(f"Orders: UP price={cfg.price_up} size={cfg.size_up} | DOWN price={cfg.price_down} size={cfg.size_down}")
+    print(f"DRY_RUN={cfg.dry_run}")
+    print(f"FUNDER_ADDRESS={cfg.funder_address}")
+    print(f"CHAIN_ID={cfg.chain_id} SIGNATURE_TYPE={cfg.signature_type}")
+    print(f"USE_DERIVED_CREDS={cfg.use_derived_creds}")
+    print(f"AUTO_REDEEM={cfg.auto_redeem} REDEEM_LOOKBACK_HOURS={cfg.redeem_lookback_hours}")
+    print("========================================\n")
 
-    print("=== Polymarket 5m BTC Slot Order Tool ===", flush=True)
-    print(f"Series: {cfg.series_slug}", flush=True)
-    print(f"Window (Europe/Madrid): {cfg.window_start_local} -> {cfg.window_end_local}", flush=True)
-    print(f"Orders: UP price={cfg.price_up} size={cfg.size_up} | DOWN price={cfg.price_down} size={cfg.size_down}", flush=True)
-    print(f"DRY_RUN={cfg.dry_run}", flush=True)
-    print(f"FUNDER_ADDRESS={cfg.funder_address}", flush=True)
-    print(f"CHAIN_ID={cfg.chain_id} SIGNATURE_TYPE={cfg.signature_type}", flush=True)
-    print(f"USE_DERIVED_CREDS={os.getenv('USE_DERIVED_CREDS','')}", flush=True)
-    print(f"AUTO_REDEEM={auto_redeem} REDEEM_LOOKBACK_HOURS={lookback_h}", flush=True)
-    print("========================================\n", flush=True)
+    # Optional: attempt to redeem resolved winnings from the last N hours.
+    # This runs BEFORE placing new orders.
+    maybe_auto_redeem(cfg)
 
-    # 1) REDEEM SIEMPRE (aunque no haya markets en la ventana)
-    if auto_redeem:
-        try:
-            print("[redeem] START", flush=True)
-            from tool.redeem import redeem_last_hours
-            redeem_last_hours(cfg, lookback_h)
-            print("[redeem] END", flush=True)
-        except Exception as e:
-            print(f"[redeem][FAIL] {e}", flush=True)
-
-    if cfg.auto_redeem:
-        try:
-            from tool.redeem import redeem_last_hours
-            redeem_last_hours(cfg, cfg.redeem_lookback_hours)
-        except Exception as e:
-            print(f"[redeem][FAIL] {e}")
-    # 2) TRADING (si hay markets)
     markets = gamma_list_markets_for_series_in_window(cfg)
-
-    if not markets:
-        print("No encontré mercados en esa ventana.", flush=True)
-        return 0
 
     if markets:
         m0 = markets[0]
-        print("[DEBUG first market]", flush=True)
-        print("DEBUG makerBaseFee:", m0.get("makerBaseFee"), flush=True)
-        print("DEBUG orderPriceMinTickSize:", m0.get("orderPriceMinTickSize"), flush=True)
-        print("DEBUG negRisk:", m0.get("negRisk"), flush=True)
-        print("", flush=True)
+        print("[DEBUG first market]")
+        print("DEBUG makerBaseFee:", m0.get("makerBaseFee"))
+        print("DEBUG orderPriceMinTickSize:", m0.get("orderPriceMinTickSize"))
+        print("DEBUG negRisk:", m0.get("negRisk"))
+        print()
 
-    print(f"Encontrados {len(markets)} markets en ventana (cap MAX_MARKETS={cfg.max_markets}).\n", flush=True)
+    if not markets:
+        print("No encontré mercados en esa ventana.")
+        return 0
+
+    print(f"Encontrados {len(markets)} markets en ventana (cap MAX_MARKETS={cfg.max_markets}).\n")
 
     ok = 0
     fail = 0
@@ -64,15 +58,16 @@ def main():
         try:
             res = place_dual_orders_for_market(cfg, m)
             ok += 1
-            print(f"[OK] {m['slug']} -> {res}\n", flush=True)
+            print(f"[OK] {m.get('slug','?')} -> {res}\n")
         except Exception as e:
             fail += 1
-            print(f"[FAIL] {m.get('slug','?')}: {e}\n", flush=True)
+            print(f"[FAIL] {m.get('slug','?')}: {e}\n")
 
-    print("=== Resumen ===", flush=True)
-    print(f"OK: {ok}", flush=True)
-    print(f"FAIL: {fail}", flush=True)
+    print("=== Resumen ===")
+    print(f"OK: {ok}")
+    print(f"FAIL: {fail}")
     return 0 if fail == 0 else 1
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
