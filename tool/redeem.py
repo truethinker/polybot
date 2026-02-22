@@ -8,7 +8,6 @@ from py_clob_client.clob_types import ApiCreds
 
 from tool.config import Config
 
-
 # NOTE
 # ----
 # Este módulo NO toca nada del flujo de órdenes.
@@ -18,6 +17,7 @@ from tool.config import Config
 
 def _env_flag(name: str, default: str = "false") -> bool:
     import os
+
     return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "y")
 
 
@@ -85,11 +85,51 @@ def _parse_dt(v: Any) -> Optional[datetime]:
 
 
 # =====================================
-# REDEEM LOGIC (SOLO DETECCIÓN)
+# WEB3 HELPERS (NONCE / FEES / RETRIES)
+# =====================================
+
+def _bump_fees(tx: dict, factor: float = 1.25) -> dict:
+    """Bump fees in-place for both EIP-1559 and legacy txs."""
+    if "maxFeePerGas" in tx and "maxPriorityFeePerGas" in tx:
+        tx["maxFeePerGas"] = int(int(tx["maxFeePerGas"]) * factor)
+        tx["maxPriorityFeePerGas"] = int(int(tx["maxPriorityFeePerGas"]) * factor)
+        return tx
+    if "gasPrice" in tx:
+        tx["gasPrice"] = int(int(tx["gasPrice"]) * factor)
+    return tx
+
+
+def _rpc_error_msg(e: Exception) -> str:
+    """Best-effort extract message from Web3 exceptions (Alchemy returns dict-like)."""
+    try:
+        if hasattr(e, "args") and e.args:
+            a0 = e.args[0]
+            if isinstance(a0, dict) and "message" in a0:
+                return str(a0.get("message"))
+            return str(a0)
+    except Exception:
+        pass
+    return str(e)
+
+
+def _is_nonce_or_underpriced_error(msg: str) -> bool:
+    msg_l = (msg or "").lower()
+    return (
+        "replacement transaction underpriced" in msg_l
+        or "nonce too low" in msg_l
+        or "already known" in msg_l
+        or "known transaction" in msg_l
+        or "transaction with the same hash was already imported" in msg_l
+    )
+
+
+# =====================================
+# REDEEM LOGIC
 # =====================================
 
 def redeem_last_hours(cfg: Config, lookback_hours: int) -> None:
     import os
+
     redeem_onchain = _env_flag("REDEEM_ONCHAIN", "false")
     auto_bridge_withdraw = _env_flag("AUTO_BRIDGE_WITHDRAW", "false")
 
@@ -141,6 +181,8 @@ def redeem_last_hours(cfg: Config, lookback_hours: int) -> None:
     try:
         import requests
         from web3 import Web3
+        # Web3 v7 PoA middleware:
+        from web3.middleware.proof_of_authority import ExtraDataToPOAMiddleware
     except Exception as e:
         print(f"[redeem][FAIL] missing deps for onchain redeem: {e}")
         print("[redeem] END")
@@ -181,10 +223,8 @@ def redeem_last_hours(cfg: Config, lookback_hours: int) -> None:
         }
     ]
 
-    from web3 import Web3
-    from web3.middleware.proof_of_authority import ExtraDataToPOAMiddleware
-
-    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 20}))
+    # Web3 provider with timeout + PoA middleware (Polygon PoS needs it)
+    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 25}))
     w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
     if not w3.is_connected():
@@ -273,8 +313,8 @@ def redeem_last_hours(cfg: Config, lookback_hours: int) -> None:
 
     chain_id = int(getattr(cfg, "chain_id", 137) or 137)
 
-    # Nonce is shared across txs
-    nonce = w3.eth.get_transaction_count(eoa)
+    # IMPORTANT: Nonce from "pending" to avoid collisions with in-flight txs
+    nonce = w3.eth.get_transaction_count(eoa, "pending")
 
     # parentCollectionId = 0x00..00 for Polymarket single-condition markets
     parent_collection_id = b"\x00" * 32
@@ -284,14 +324,15 @@ def redeem_last_hours(cfg: Config, lookback_hours: int) -> None:
 
     for cid, idx_sets in grouped.items():
         idx_list = sorted(idx_sets)
+
         title = None
-        # optional: find a title from positions list
         for p in redeemable:
             if (p.get("conditionId") or "").lower() == cid and p.get("title"):
                 title = p.get("title")
                 break
         label = (title or cid[:12])
 
+        # Build base transaction
         try:
             tx = ctf.functions.redeemPositions(
                 collateral_addr,
@@ -309,10 +350,10 @@ def redeem_last_hours(cfg: Config, lookback_hours: int) -> None:
                 est = w3.eth.estimate_gas(tx)
                 tx["gas"] = int(est * 1.25)  # buffer
             except Exception:
-                # fallback
                 tx["gas"] = 350_000
 
             # Fees (best-effort)
+            # Prefer EIP-1559 if baseFee available
             try:
                 pending = w3.eth.get_block("pending")
                 base_fee = pending.get("baseFeePerGas")
@@ -322,15 +363,20 @@ def redeem_last_hours(cfg: Config, lookback_hours: int) -> None:
                     tx["maxPriorityFeePerGas"] = max_priority
                     tx["maxFeePerGas"] = max_fee
                     tx["type"] = 2
+                    # ensure no legacy field
+                    tx.pop("gasPrice", None)
                 else:
-                    # legacy
                     gp = int(w3.eth.gas_price * gas_bump)
                     tx["gasPrice"] = gp
                     tx["type"] = 0
+                    tx.pop("maxFeePerGas", None)
+                    tx.pop("maxPriorityFeePerGas", None)
             except Exception:
                 gp = int(w3.eth.gas_price * gas_bump)
                 tx["gasPrice"] = gp
                 tx["type"] = 0
+                tx.pop("maxFeePerGas", None)
+                tx.pop("maxPriorityFeePerGas", None)
 
             print(f"[redeem][onchain] redeem {label} indexSets={idx_list} nonce={nonce} gas={tx.get('gas')}")
 
@@ -339,22 +385,59 @@ def redeem_last_hours(cfg: Config, lookback_hours: int) -> None:
                 nonce += 1
                 continue
 
-            signed = acct.sign_transaction(tx)
-            txh = w3.eth.send_raw_transaction(signed.raw_transaction)
-            tx_hex = txh.hex()
-            print(f"[redeem][onchain] sent: {tx_hex}")
-            receipt = w3.eth.wait_for_transaction_receipt(txh, confirmations=wait_confs, timeout=300)
-            status = receipt.get("status")
-            if status == 1:
-                print(f"[redeem][onchain] confirmed: {tx_hex}")
-                success += 1
-            else:
-                print(f"[redeem][onchain][FAIL] reverted: {tx_hex}")
-                failed += 1
-            nonce += 1
+            # SEND with retry on nonce/underpriced issues
+            attempts = 0
+            while True:
+                try:
+                    signed = acct.sign_transaction(tx)
+                    # web3 v7: raw_transaction (snake_case)
+                    txh = w3.eth.send_raw_transaction(signed.raw_transaction)
+                    tx_hex = txh.hex()
+                    print(f"[redeem][onchain] sent: {tx_hex}")
+                    receipt = w3.eth.wait_for_transaction_receipt(
+                        txh, confirmations=wait_confs, timeout=300
+                    )
+                    status = receipt.get("status")
+                    if status == 1:
+                        print(f"[redeem][onchain] confirmed: {tx_hex}")
+                        success += 1
+                    else:
+                        print(f"[redeem][onchain][FAIL] reverted: {tx_hex}")
+                        failed += 1
+                    nonce += 1
+                    break
+                except Exception as e:
+                    msg = _rpc_error_msg(e)
+                    if _is_nonce_or_underpriced_error(msg):
+                        attempts += 1
+                        if attempts > 3:
+                            failed += 1
+                            print(f"[redeem][onchain][FAIL] {label}: {msg}")
+                            # Refresh nonce for next market attempt
+                            nonce = w3.eth.get_transaction_count(eoa, "pending")
+                            break
+
+                        # Refresh nonce and bump fees then retry
+                        nonce = w3.eth.get_transaction_count(eoa, "pending")
+                        tx["nonce"] = nonce
+                        _bump_fees(tx, 1.25)
+                        print(f"[redeem][onchain][RETRY] {label} refreshed nonce={nonce} bumped fees (attempt {attempts})")
+                        continue
+
+                    failed += 1
+                    print(f"[redeem][onchain][FAIL] {label}: {msg}")
+                    # Refresh nonce for safety and continue with next item
+                    nonce = w3.eth.get_transaction_count(eoa, "pending")
+                    break
+
         except Exception as e:
             failed += 1
-            print(f"[redeem][onchain][FAIL] {label}: {e}")
+            print(f"[redeem][onchain][FAIL] {label}: {_rpc_error_msg(e)}")
+            # Refresh nonce for safety
+            try:
+                nonce = w3.eth.get_transaction_count(eoa, "pending")
+            except Exception:
+                pass
 
     print(f"[redeem][onchain] done. success={success} failed={failed}")
 
@@ -362,7 +445,12 @@ def redeem_last_hours(cfg: Config, lookback_hours: int) -> None:
     # This is independent from the redeem itself.
     if auto_bridge_withdraw and success > 0:
         try:
-            from tool.bridge_withdraw import BridgeWithdrawRequest, create_withdraw_addresses, erc20_transfer, to_raw_amount
+            from tool.bridge_withdraw import (
+                BridgeWithdrawRequest,
+                create_withdraw_addresses,
+                erc20_transfer,
+                to_raw_amount,
+            )
 
             bridge_api = os.getenv("BRIDGE_API_URL", "https://bridge.polymarket.com").rstrip("/")
             to_chain_id = (os.getenv("BRIDGE_TO_CHAIN_ID", "") or "").strip()
@@ -408,6 +496,6 @@ def redeem_last_hours(cfg: Config, lookback_hours: int) -> None:
                 )
                 print(f"[redeem][bridge] sent USDC.e transfer: {txh}")
         except Exception as e:
-            print(f"[redeem][bridge][WARN] bridge withdraw step failed: {e}")
+            print(f"[redeem][bridge][WARN] bridge withdraw step failed: {_rpc_error_msg(e)}")
 
     print("[redeem] END")
