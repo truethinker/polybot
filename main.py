@@ -89,4 +89,6 @@ def main():
     return 0 if fail == 0 else 1
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    test_rpc()
+    raise SystemExit(0)  # o exit(0)
+    # main()  # deja esto comentado mientras haces la prueba
