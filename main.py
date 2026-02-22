@@ -4,21 +4,6 @@ os.environ["PYTHONUNBUFFERED"] = "1"
 from tool.config import load_config
 from tool.gamma import gamma_list_markets_for_series_in_window
 from tool.clob_orders import place_dual_orders_for_market
-import os
-
-# ... tus imports actuales ...
-from web3 import Web3  # asegúrate de tener web3 instalado
-
-def test_rpc():
-    rpc = os.getenv("RPC_URL")
-    print("RPC_URL =", rpc)
-
-    w3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 15}))
-    try:
-        print("is_connected =", w3.is_connected())
-        print("chain_id =", w3.eth.chain_id)
-    except Exception as e:
-        print("RPC ERROR:", repr(e))
 def main():
     print(">>> MAIN.PY LOADED: REDEEM CHECKPOINT v1 <<<", flush=True)
     
@@ -89,6 +74,4 @@ def main():
     return 0 if fail == 0 else 1
 
 if __name__ == "__main__":
-    test_rpc()
-    raise SystemExit(0)  # o exit(0)
-    # main()  # deja esto comentado mientras haces la prueba
+    main()
