@@ -340,7 +340,7 @@ def redeem_last_hours(cfg: Config, lookback_hours: int) -> None:
                 continue
 
             signed = acct.sign_transaction(tx)
-            txh = w3.eth.send_raw_transaction(signed.rawTransaction)
+            txh = w3.eth.send_raw_transaction(signed.raw_transaction)
             tx_hex = txh.hex()
             print(f"[redeem][onchain] sent: {tx_hex}")
             receipt = w3.eth.wait_for_transaction_receipt(txh, confirmations=wait_confs, timeout=300)
