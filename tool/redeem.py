@@ -181,7 +181,11 @@ def redeem_last_hours(cfg: Config, lookback_hours: int) -> None:
         }
     ]
 
-    w3 = Web3(Web3.HTTPProvider(rpc_url))
+    from web3.middleware import geth_poa_middleware
+
+    w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 20}))
+    w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+
     if not w3.is_connected():
         print("[redeem][FAIL] could not connect to RPC_URL")
         print("[redeem] END")
