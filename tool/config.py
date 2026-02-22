@@ -35,15 +35,6 @@ class Config:
     redeem_lookback_hours: int
     use_derived_creds: bool
 
-    # redeem (on-chain, EOA)
-    redeem_onchain: bool
-    rpc_url: str
-    data_api_url: str
-    conditional_tokens_address: str
-    collateral_token_address: str
-    min_redeemable_usd: float
-    redeem_wait_confirmations: int
-
     @property
     def tz(self):
         return pytz.timezone("Europe/Madrid")
@@ -97,19 +88,4 @@ def load_config() -> Config:
         auto_redeem=_getenv("AUTO_REDEEM", "false").lower() in ("1", "true", "yes"),
         redeem_lookback_hours=int(_getenv("REDEEM_LOOKBACK_HOURS", "12")),
         use_derived_creds=_getenv("USE_DERIVED_CREDS", "false").lower() in ("1", "true", "yes"),
-
-        # on-chain redeem (defaults target Polygon)
-        redeem_onchain=_getenv("REDEEM_ONCHAIN", "false").lower() in ("1", "true", "yes"),
-        rpc_url=_getenv("RPC_URL", ""),
-        data_api_url=_getenv("DATA_API_URL", "https://data-api.polymarket.com"),
-        conditional_tokens_address=_getenv(
-            "CONDITIONAL_TOKENS_ADDRESS",
-            "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",  # Polygon ConditionalTokens (public examples)
-        ),
-        collateral_token_address=_getenv(
-            "COLLATERAL_TOKEN_ADDRESS",
-            "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",  # USDC.e (Polygon)
-        ),
-        min_redeemable_usd=float(_getenv("MIN_REDEEMABLE_USD", "0")),
-        redeem_wait_confirmations=int(_getenv("REDEEM_WAIT_CONFIRMATIONS", "1")),
     )

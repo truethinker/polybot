@@ -3,18 +3,22 @@ from __future__ import annotations
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Any
 
-import os
-import requests
-
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds
 
 from tool.config import Config
 
-try:
-    from web3 import Web3
-except Exception:  # pragma: no cover
-    Web3 = None  # type: ignore
+
+# NOTE
+# ----
+# Este módulo NO toca nada del flujo de órdenes.
+# Mantiene el comportamiento previo (detect-only) por defecto.
+# Si REDEEM_ONCHAIN=true, ejecuta redeem on-chain con la EOA (cfg.private_key).
+
+
+def _env_flag(name: str, default: str = "false") -> bool:
+    import os
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "y")
 
 
 # =====================================
@@ -85,14 +89,11 @@ def _parse_dt(v: Any) -> Optional[datetime]:
 # =====================================
 
 def redeem_last_hours(cfg: Config, lookback_hours: int) -> None:
-    # Backward compatible entry point.
-    # If REDEEM_ONCHAIN=true -> executes on-chain redeem with the EOA (PRIVATE_KEY).
-    # Otherwise keeps the previous behaviour (trade detection only).
-    if getattr(cfg, "redeem_onchain", False):
-        redeem_onchain_last_hours(cfg, lookback_hours)
-        return
+    import os
+    redeem_onchain = _env_flag("REDEEM_ONCHAIN", "false")
+    auto_bridge_withdraw = _env_flag("AUTO_BRIDGE_WITHDRAW", "false")
 
-    print("[redeem] START (detect-only)")
+    print(f"[redeem] START ({'onchain' if redeem_onchain else 'detect-only'})")
 
     end_utc = datetime.fromisoformat(
         cfg.window_end_utc_iso().replace("Z", "+00:00")
@@ -102,324 +103,306 @@ def redeem_last_hours(cfg: Config, lookback_hours: int) -> None:
 
     print(f"[redeem] window: {start_utc} -> {end_utc}")
 
-    client = _mk_client(cfg)
-
+    # --- Always keep the old detection output (useful debugging) ---
     try:
+        client = _mk_client(cfg)
         trades = client.get_trades()
         if isinstance(trades, dict) and "data" in trades:
             trades = trades["data"]
+        trades = trades or []
         print(f"[redeem] trades fetched: {len(trades)}")
-    except Exception as e:
-        print(f"[redeem][FAIL] get_trades failed: {e}")
-        print("[redeem] END")
-        return
-
-    if not trades:
-        print("[redeem] no trades found")
-        print("[redeem] END")
-        return
-
-    hits = []
-
-    for t in trades:
-        dt = _parse_dt(t.get("match_time")) or _parse_dt(t.get("last_update"))
-        if not dt:
-            continue
-
-        if start_utc <= dt <= end_utc:
-            hits.append((t, dt))
-
-    print(f"[redeem] hits in window: {len(hits)}")
-
-    for t, dt in hits[:20]:
-        print(
-            "[redeem][TRADE]",
-            {
-                "dt": dt.isoformat(),
-                "market": t.get("market"),
-                "outcome": t.get("outcome"),
-                "side": t.get("side"),
-                "price": t.get("price"),
-                "size": t.get("size"),
-                "status": t.get("status"),
-            },
-        )
-
-    print("[redeem] END")
-
-
-# =====================================
-# ON-CHAIN REDEEM (EOA)
-# =====================================
-
-_CT_ABI = [
-    {
-        "inputs": [
-            {"internalType": "address", "name": "collateralToken", "type": "address"},
-            {"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"},
-            {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"},
-            {"internalType": "uint256[]", "name": "indexSets", "type": "uint256[]"},
-        ],
-        "name": "redeemPositions",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function",
-    }
-]
-
-
-def _bool_env(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "y")
-
-
-def _data_api_url(cfg: Config) -> str:
-    return (cfg.data_api_url or "https://data-api.polymarket.com").rstrip("/")
-
-
-def _fetch_positions(cfg: Config) -> list[dict]:
-    """Fetch wallet positions from Polymarket Data API (best-effort)."""
-    base = f"{_data_api_url(cfg)}/positions"
-    limit = 500
-    offset = 0
-    out: list[dict] = []
-
-    while True:
-        url = (
-            f"{base}?user={cfg.funder_address}"
-            f"&redeemable=true&sizeThreshold=0&limit={limit}&offset={offset}"
-        )
-        r = requests.get(url, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        if not isinstance(data, list):
-            raise RuntimeError(f"Unexpected positions payload: {type(data)}")
-
-        if offset == 0:
-            keys = list(data[0].keys())[:30] if data else []
-            print(f"[redeem][positions] page0 count={len(data)} sampleKeys={','.join(keys)}")
-        else:
-            print(f"[redeem][positions] offset={offset} count={len(data)}")
-
-        out.extend(data)
-        if len(data) < limit:
-            break
-        offset += limit
-        if offset > 5000:
-            break
-
-    return out
-
-
-def _parse_iso(v: Any) -> Optional[datetime]:
-    if not v:
-        return None
-    if isinstance(v, datetime):
-        return v
-    if isinstance(v, (int, float)):
-        # seconds
-        return datetime.fromtimestamp(float(v), tz=timezone.utc)
-    if isinstance(v, str):
-        try:
-            s = v.strip().replace("Z", "+00:00")
-            dt = datetime.fromisoformat(s)
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc)
-        except Exception:
-            return None
-    return None
-
-
-def _position_timestamp(pos: dict) -> Optional[datetime]:
-    for k in (
-        "resolvedAt",
-        "marketEndTime",
-        "eventEndTime",
-        "endTime",
-        "marketStartTime",
-        "eventStartTime",
-        "startTime",
-        "startDate",
-        "createdAt",
-        "updatedAt",
-    ):
-        dt = _parse_iso(pos.get(k))
-        if dt:
-            return dt
-    return None
-
-
-def _to_usd(pos: dict) -> float:
-    v = pos.get("redeemable")
-    if v is None:
-        v = pos.get("redeemableValue")
-    if v is None:
-        v = pos.get("redeemable_value")
-    try:
-        return float(v or 0)
-    except Exception:
-        return 0.0
-
-
-def _pick_redeemables(cfg: Config, positions: list[dict], lookback_hours: int) -> list[dict]:
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=int(lookback_hours))
-    out: list[dict] = []
-    for p in positions:
-        usd = _to_usd(p)
-        is_redeemable = bool(p.get("isRedeemable") is True or usd > 0)
-        if not is_redeemable:
-            continue
-        if usd < float(getattr(cfg, "min_redeemable_usd", 0) or 0):
-            continue
-        ts = _position_timestamp(p)
-        if ts and ts < cutoff:
-            continue
-
-        condition_id = p.get("conditionId") or p.get("condition_id") or p.get("condition")
-        index_set = p.get("indexSet") or p.get("index_set") or p.get("index")
-        if not condition_id or index_set is None:
-            continue
-
-        out.append(
-            {
-                "conditionId": str(condition_id),
-                "indexSet": str(index_set),
-                "redeemableUsd": usd,
-                "ts": ts.isoformat() if ts else None,
-                "marketSlug": p.get("marketSlug") or p.get("slug") or p.get("market") or p.get("marketId"),
-            }
-        )
-
-    return out
-
-
-def _mk_web3(cfg: Config) -> Web3:
-    if Web3 is None:
-        raise RuntimeError("web3 is not installed. Did you install requirements.txt?")
-    if not cfg.rpc_url:
-        raise RuntimeError("RPC_URL is required for on-chain redeem")
-    w3 = Web3(Web3.HTTPProvider(cfg.rpc_url, request_kwargs={"timeout": 30}))
-    if not w3.is_connected():
-        raise RuntimeError("Could not connect to RPC_URL")
-    return w3
-
-
-def _gas_params(w3: Web3) -> dict:
-    """Best-effort gas params supporting both legacy and EIP-1559."""
-    # If node supports baseFeePerGas, use EIP-1559.
-    try:
-        block = w3.eth.get_block("latest")
-        base_fee = block.get("baseFeePerGas")
-        if base_fee is not None:
-            prio_gwei = float(os.getenv("MAX_PRIORITY_FEE_GWEI", "30"))
-            prio = w3.to_wei(prio_gwei, "gwei")
-            max_fee = int(base_fee) * 2 + int(prio)
-            return {"maxFeePerGas": max_fee, "maxPriorityFeePerGas": int(prio)}
-    except Exception:
-        pass
-
-    # Fallback legacy gasPrice.
-    gas_price = w3.eth.gas_price
-    bump = float(os.getenv("GAS_PRICE_BUMP", "1.2"))
-    return {"gasPrice": int(gas_price * bump)}
-
-
-def redeem_onchain_last_hours(cfg: Config, lookback_hours: int) -> None:
-    print("[redeem] START (on-chain)")
-    print(f"[redeem] lookback_hours={lookback_hours} min_redeemable_usd={cfg.min_redeemable_usd}")
-
-    positions = _fetch_positions(cfg)
-    redeemables = _pick_redeemables(cfg, positions, lookback_hours)
-
-    if not redeemables:
-        print(
-            "[redeem] No hay posiciones redeemables en Data API (o no hay shares en wallet). "
-            "OJO: si compraste en CLOB, es posible que las shares estén en el exchange y necesites WITHDRAW a tu wallet antes de poder hacer redeem."
-        )
-        print("[redeem] END")
-        return
-
-    print(f"[redeem] redeemables={len(redeemables)}")
-    for r in redeemables[:50]:
-        t = f" ts={r['ts']}" if r.get("ts") else ""
-        s = f" slug={r['marketSlug']}" if r.get("marketSlug") else ""
-        print(
-            f"[redeem][pos] conditionId={r['conditionId']} indexSet={r['indexSet']} redeemableUsd~{r['redeemableUsd']}{t}{s}"
-        )
-    if len(redeemables) > 50:
-        print(f"[redeem] (+{len(redeemables)-50} más)")
-
-    if cfg.dry_run or _bool_env("DRY_RUN", "false"):
-        print("[redeem] DRY_RUN=true -> no envío transacciones.")
-        print("[redeem] END")
-        return
-
-    w3 = _mk_web3(cfg)
-    acct = w3.eth.account.from_key(cfg.private_key)
-    if acct.address.lower() != cfg.funder_address.lower():
-        print(
-            f"[redeem][WARN] FUNDER_ADDRESS ({cfg.funder_address}) no coincide con address derivada de PRIVATE_KEY ({acct.address}). "
-            "Continuo usando la PRIVATE_KEY para firmar (EOA)."
-        )
-
-    ct_addr = w3.to_checksum_address(cfg.conditional_tokens_address)
-    collateral_addr = w3.to_checksum_address(cfg.collateral_token_address)
-    ct = w3.eth.contract(address=ct_addr, abi=_CT_ABI)
-
-    # Group by conditionId to batch indexSets per tx
-    grouped: dict[str, set[int]] = {}
-    for r in redeemables:
-        cid = str(r["conditionId"])
-        idx_raw = str(r["indexSet"]).strip()
-        try:
-            idx = int(idx_raw, 0)  # handles "0x.." and decimal
-        except Exception:
-            idx = int(float(idx_raw))
-        grouped.setdefault(cid, set()).add(idx)
-
-    nonce = w3.eth.get_transaction_count(acct.address)
-    sent = 0
-    for cid, idxs in grouped.items():
-        idx_list = sorted(list(idxs))
-        try:
-            tx = ct.functions.redeemPositions(
-                collateral_addr,
-                "0x" + "00" * 32,  # parentCollectionId = bytes32(0)
-                cid,
-                idx_list,
-            ).build_transaction(
+        hits = []
+        for t in trades:
+            dt = _parse_dt(t.get("match_time")) or _parse_dt(t.get("last_update"))
+            if dt and start_utc <= dt <= end_utc:
+                hits.append((t, dt))
+        print(f"[redeem] hits in window: {len(hits)}")
+        for t, dt in hits[:20]:
+            print(
+                "[redeem][TRADE]",
                 {
-                    "from": acct.address,
-                    "nonce": nonce,
-                    "chainId": int(cfg.chain_id),
-                    **_gas_params(w3),
-                }
+                    "dt": dt.isoformat(),
+                    "market": t.get("market"),
+                    "outcome": t.get("outcome"),
+                    "side": t.get("side"),
+                    "price": t.get("price"),
+                    "size": t.get("size"),
+                    "status": t.get("status"),
+                },
             )
-            # estimate gas and add a buffer
+    except Exception as e:
+        print(f"[redeem][WARN] detect-only step failed: {e}")
+
+    if not redeem_onchain:
+        print("[redeem] END")
+        return
+
+    # --- On-chain redeem ---
+    try:
+        import requests
+        from web3 import Web3
+    except Exception as e:
+        print(f"[redeem][FAIL] missing deps for onchain redeem: {e}")
+        print("[redeem] END")
+        return
+
+    rpc_url = os.getenv("RPC_URL", "").strip()
+    if not rpc_url:
+        print("[redeem][FAIL] RPC_URL is required when REDEEM_ONCHAIN=true")
+        print("[redeem] END")
+        return
+
+    data_api = os.getenv("DATA_API_URL", "https://data-api.polymarket.com").rstrip("/")
+    ctf_addr = Web3.to_checksum_address(os.getenv(
+        "CONDITIONAL_TOKENS_ADDRESS",
+        "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045",
+    ))
+    collateral_addr = Web3.to_checksum_address(os.getenv(
+        "COLLATERAL_TOKEN_ADDRESS",
+        # USDC (PoS) en Polygon (standard en Polymarket)
+        "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    ))
+    min_usd = float(os.getenv("MIN_REDEEMABLE_USD", "0") or 0)
+    wait_confs = int(os.getenv("REDEEM_WAIT_CONFIRMATIONS", "1") or 1)
+
+    # Minimal ABI for redeemPositions
+    CTF_ABI = [
+        {
+            "inputs": [
+                {"internalType": "address", "name": "collateralToken", "type": "address"},
+                {"internalType": "bytes32", "name": "parentCollectionId", "type": "bytes32"},
+                {"internalType": "bytes32", "name": "conditionId", "type": "bytes32"},
+                {"internalType": "uint256[]", "name": "indexSets", "type": "uint256[]"},
+            ],
+            "name": "redeemPositions",
+            "outputs": [],
+            "stateMutability": "nonpayable",
+            "type": "function",
+        }
+    ]
+
+    w3 = Web3(Web3.HTTPProvider(rpc_url))
+    if not w3.is_connected():
+        print("[redeem][FAIL] could not connect to RPC_URL")
+        print("[redeem] END")
+        return
+
+    acct = w3.eth.account.from_key(cfg.private_key)
+    eoa = acct.address
+
+    # Pull redeemable positions from Data API
+    # Docs: /positions?user=0x..&redeemable=true&sizeThreshold=0&limit=500
+    url = f"{data_api}/positions"
+    params = {
+        "user": eoa,
+        "redeemable": "true",
+        "sizeThreshold": "0",
+        "limit": "500",
+    }
+
+    try:
+        r = requests.get(url, params=params, timeout=20)
+        if not r.ok:
+            raise RuntimeError(f"positions API failed: {r.status_code} {r.text[:200]}")
+        positions = r.json() or []
+    except Exception as e:
+        print(f"[redeem][FAIL] fetching redeemable positions failed: {e}")
+        print("[redeem] END")
+        return
+
+    # Filter positions that are actually redeemable + above min_usd if field present
+    redeemable = []
+    for p in positions:
+        if not p or not p.get("redeemable"):
+            continue
+        cv = p.get("currentValue")
+        if cv is not None:
+            try:
+                if float(cv) < min_usd:
+                    continue
+            except Exception:
+                pass
+        redeemable.append(p)
+
+    print(f"[redeem][onchain] redeemable positions: {len(redeemable)} (min_usd={min_usd})")
+
+    if not redeemable:
+        print("[redeem][onchain] nothing to redeem")
+        print("[redeem] END")
+        return
+
+    # Group by conditionId; gather indexSets from outcomeIndex
+    grouped: dict[str, set[int]] = {}
+    skipped_neg = 0
+    for p in redeemable:
+        if p.get("negativeRisk"):
+            skipped_neg += 1
+            continue
+        cid = (p.get("conditionId") or "").lower()
+        if not cid:
+            continue
+        oi = p.get("outcomeIndex")
+        if oi is None:
+            continue
+        try:
+            oi_int = int(oi)
+        except Exception:
+            continue
+        index_set = 1 << oi_int
+        grouped.setdefault(cid, set()).add(index_set)
+
+    if skipped_neg:
+        print(f"[redeem][onchain][WARN] skipped {skipped_neg} negativeRisk positions (adapter not enabled)")
+
+    if not grouped:
+        print("[redeem][onchain] nothing redeemable after filtering")
+        print("[redeem] END")
+        return
+
+    ctf = w3.eth.contract(address=ctf_addr, abi=CTF_ABI)
+
+    # EIP-1559 gas controls (optional)
+    max_priority_gwei = float(os.getenv("MAX_PRIORITY_FEE_GWEI", "30") or 30)
+    gas_bump = float(os.getenv("GAS_PRICE_BUMP", "1.2") or 1.2)
+    dry_run = bool(getattr(cfg, "dry_run", False))
+
+    chain_id = int(getattr(cfg, "chain_id", 137) or 137)
+
+    # Nonce is shared across txs
+    nonce = w3.eth.get_transaction_count(eoa)
+
+    # parentCollectionId = 0x00..00 for Polymarket single-condition markets
+    parent_collection_id = b"\x00" * 32
+
+    success = 0
+    failed = 0
+
+    for cid, idx_sets in grouped.items():
+        idx_list = sorted(idx_sets)
+        title = None
+        # optional: find a title from positions list
+        for p in redeemable:
+            if (p.get("conditionId") or "").lower() == cid and p.get("title"):
+                title = p.get("title")
+                break
+        label = (title or cid[:12])
+
+        try:
+            tx = ctf.functions.redeemPositions(
+                collateral_addr,
+                parent_collection_id,
+                Web3.to_bytes(hexstr=cid),
+                idx_list,
+            ).build_transaction({
+                "from": eoa,
+                "nonce": nonce,
+                "chainId": chain_id,
+            })
+
+            # Estimate gas
             try:
                 est = w3.eth.estimate_gas(tx)
-                tx["gas"] = int(est * 1.25)
+                tx["gas"] = int(est * 1.25)  # buffer
             except Exception:
-                tx.setdefault("gas", 600_000)
+                # fallback
+                tx["gas"] = 350_000
+
+            # Fees (best-effort)
+            try:
+                pending = w3.eth.get_block("pending")
+                base_fee = pending.get("baseFeePerGas")
+                if base_fee is not None:
+                    max_priority = int(max_priority_gwei * 1e9)
+                    max_fee = int((int(base_fee) + max_priority) * gas_bump)
+                    tx["maxPriorityFeePerGas"] = max_priority
+                    tx["maxFeePerGas"] = max_fee
+                    tx["type"] = 2
+                else:
+                    # legacy
+                    gp = int(w3.eth.gas_price * gas_bump)
+                    tx["gasPrice"] = gp
+                    tx["type"] = 0
+            except Exception:
+                gp = int(w3.eth.gas_price * gas_bump)
+                tx["gasPrice"] = gp
+                tx["type"] = 0
+
+            print(f"[redeem][onchain] redeem {label} indexSets={idx_list} nonce={nonce} gas={tx.get('gas')}")
+
+            if dry_run:
+                print("[redeem][onchain] DRY_RUN=true (tx not sent)")
+                nonce += 1
+                continue
 
             signed = acct.sign_transaction(tx)
-            tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
-            sent += 1
-            print(f"[redeem][tx] sent conditionId={cid} indexSets={idx_list} hash={tx_hash.hex()}")
-
-            confs = int(getattr(cfg, "redeem_wait_confirmations", 1) or 1)
-            if confs > 0:
-                receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
-                status = receipt.get("status")
-                if status != 1:
-                    print(f"[redeem][tx][FAIL] status={status} hash={tx_hash.hex()}")
-                else:
-                    print(f"[redeem][tx][OK] block={receipt.get('blockNumber')} hash={tx_hash.hex()}")
-
+            txh = w3.eth.send_raw_transaction(signed.rawTransaction)
+            tx_hex = txh.hex()
+            print(f"[redeem][onchain] sent: {tx_hex}")
+            receipt = w3.eth.wait_for_transaction_receipt(txh, confirmations=wait_confs, timeout=300)
+            status = receipt.get("status")
+            if status == 1:
+                print(f"[redeem][onchain] confirmed: {tx_hex}")
+                success += 1
+            else:
+                print(f"[redeem][onchain][FAIL] reverted: {tx_hex}")
+                failed += 1
             nonce += 1
         except Exception as e:
-            print(f"[redeem][tx][FAIL] conditionId={cid}: {e}")
-            nonce += 1
+            failed += 1
+            print(f"[redeem][onchain][FAIL] {label}: {e}")
 
-    print(f"[redeem] submitted_txs={sent} groups={len(grouped)}")
+    print(f"[redeem][onchain] done. success={success} failed={failed}")
+
+    # Optional: bridge-withdraw USDC.e out of Polygon after redeem.
+    # This is independent from the redeem itself.
+    if auto_bridge_withdraw and success > 0:
+        try:
+            from tool.bridge_withdraw import BridgeWithdrawRequest, create_withdraw_addresses, erc20_transfer, to_raw_amount
+
+            bridge_api = os.getenv("BRIDGE_API_URL", "https://bridge.polymarket.com").rstrip("/")
+            to_chain_id = (os.getenv("BRIDGE_TO_CHAIN_ID", "") or "").strip()
+            to_token = (os.getenv("BRIDGE_TO_TOKEN_ADDRESS", "") or "").strip()
+            recipient = (os.getenv("BRIDGE_RECIPIENT", "") or "").strip()
+            amount_usd = float(os.getenv("BRIDGE_WITHDRAW_AMOUNT_USD", "0") or 0)
+
+            if not (to_chain_id and to_token and recipient and amount_usd > 0):
+                print(
+                    "[redeem][bridge][SKIP] AUTO_BRIDGE_WITHDRAW=true but missing config. "
+                    "Need BRIDGE_TO_CHAIN_ID, BRIDGE_TO_TOKEN_ADDRESS, BRIDGE_RECIPIENT, BRIDGE_WITHDRAW_AMOUNT_USD>0"
+                )
+            else:
+                req = BridgeWithdrawRequest(
+                    address=eoa,
+                    to_chain_id=str(to_chain_id),
+                    to_token_address=str(to_token),
+                    recipient_addr=str(recipient),
+                )
+                resp = create_withdraw_addresses(req, bridge_api=bridge_api)
+                addr_obj = (resp or {}).get("address") or {}
+                dep = addr_obj.get("evm")
+                if not dep:
+                    raise RuntimeError(f"bridge response missing address.evm: {resp}")
+
+                raw = to_raw_amount(amount_usd, decimals=6)
+                print(
+                    f"[redeem][bridge] depositAddress(evm)={dep} amount_usd={amount_usd} raw={raw} "
+                    f"toChainId={to_chain_id} recipient={recipient}"
+                )
+
+                txh = erc20_transfer(
+                    rpc_url=rpc_url,
+                    private_key=cfg.private_key,
+                    token_address=collateral_addr,
+                    to_address=dep,
+                    amount_raw=raw,
+                    chain_id=chain_id,
+                    gas_price_bump=gas_bump,
+                    max_priority_fee_gwei=max_priority_gwei,
+                    wait_confirmations=wait_confs,
+                    dry_run=dry_run,
+                )
+                print(f"[redeem][bridge] sent USDC.e transfer: {txh}")
+        except Exception as e:
+            print(f"[redeem][bridge][WARN] bridge withdraw step failed: {e}")
+
     print("[redeem] END")
