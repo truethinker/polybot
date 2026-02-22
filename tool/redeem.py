@@ -1,54 +1,158 @@
 from __future__ import annotations
 
-"""Redeem (claim) winnings for resolved markets.
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Any
 
-Why this module exists
-----------------------
-The CLOB Python SDK does not consistently expose a "redeem/claim" helper, and
-API-key based endpoints can yield 401 even while posting orders works.
-
-So we redeem *on-chain* via the Conditional Tokens Framework (CTF) contract.
-
-Important
----------
-- This sends Polygon transactions from the EOA corresponding to PRIVATE_KEY.
-- The sender must hold the position tokens (ERC-1155) for the resolved market.
-- If you traded using a different signer/funder in the past, use that key.
-
-This module is intentionally defensive: it will only attempt a redeem when it
-can (a) find a resolved market in the lookback window, (b) derive a winning
-outcome, and (c) detect a positive balance of the winning token.
-"""
-
-import json
-from dataclasses import dataclass
-from datetime import datetime, timedelta
-from typing import Any
-
-import pytz
+import os
 import requests
-from web3 import Web3
+
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import ApiCreds
 
 from tool.config import Config
 
-# --- Minimal ABIs (only what we need) ---
+try:
+    from web3 import Web3
+except Exception:  # pragma: no cover
+    Web3 = None  # type: ignore
 
-ERC1155_ABI = [
-    {
-        "constant": True,
-        "inputs": [
-            {"name": "account", "type": "address"},
-            {"name": "id", "type": "uint256"},
-        ],
-        "name": "balanceOf",
-        "outputs": [{"name": "", "type": "uint256"}],
-        "payable": False,
-        "stateMutability": "view",
-        "type": "function",
-    }
-]
 
-CTF_ABI = [
+# =====================================
+# CLIENT (IDÉNTICO AL QUE METE ÓRDENES)
+# =====================================
+
+def _mk_client(cfg: Config) -> ClobClient:
+    client = ClobClient(
+        host=cfg.clob_host.rstrip("/"),
+        chain_id=cfg.chain_id,
+        key=cfg.private_key,
+        signature_type=cfg.signature_type,
+        funder=cfg.funder_address,
+    )
+
+    if cfg.use_derived_creds:
+        client.set_api_creds(client.create_or_derive_api_creds())
+        print("[redeem] derived creds applied")
+    else:
+        client.set_api_creds(
+            ApiCreds(
+                api_key=cfg.clob_api_key,
+                api_secret=cfg.clob_api_secret,
+                api_passphrase=cfg.clob_api_passphrase,
+            )
+        )
+        print("[redeem] manual creds applied")
+
+    return client
+
+
+# =====================================
+# TIMESTAMP PARSING ROBUSTO
+# =====================================
+
+def _parse_dt(v: Any) -> Optional[datetime]:
+    if v is None:
+        return None
+
+    if isinstance(v, datetime):
+        return v.astimezone(timezone.utc)
+
+    if isinstance(v, (int, float)):
+        x = float(v)
+        if x > 1e12:  # ms
+            return datetime.fromtimestamp(x / 1000, tz=timezone.utc)
+        return datetime.fromtimestamp(x, tz=timezone.utc)
+
+    if isinstance(v, str):
+        s = v.strip()
+        if s.isdigit():
+            return _parse_dt(int(s))
+        try:
+            if s.endswith("Z"):
+                s = s.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            return None
+
+    return None
+
+
+# =====================================
+# REDEEM LOGIC (SOLO DETECCIÓN)
+# =====================================
+
+def redeem_last_hours(cfg: Config, lookback_hours: int) -> None:
+    # Backward compatible entry point.
+    # If REDEEM_ONCHAIN=true -> executes on-chain redeem with the EOA (PRIVATE_KEY).
+    # Otherwise keeps the previous behaviour (trade detection only).
+    if getattr(cfg, "redeem_onchain", False):
+        redeem_onchain_last_hours(cfg, lookback_hours)
+        return
+
+    print("[redeem] START (detect-only)")
+
+    end_utc = datetime.fromisoformat(
+        cfg.window_end_utc_iso().replace("Z", "+00:00")
+    ).astimezone(timezone.utc)
+
+    start_utc = end_utc - timedelta(hours=int(lookback_hours))
+
+    print(f"[redeem] window: {start_utc} -> {end_utc}")
+
+    client = _mk_client(cfg)
+
+    try:
+        trades = client.get_trades()
+        if isinstance(trades, dict) and "data" in trades:
+            trades = trades["data"]
+        print(f"[redeem] trades fetched: {len(trades)}")
+    except Exception as e:
+        print(f"[redeem][FAIL] get_trades failed: {e}")
+        print("[redeem] END")
+        return
+
+    if not trades:
+        print("[redeem] no trades found")
+        print("[redeem] END")
+        return
+
+    hits = []
+
+    for t in trades:
+        dt = _parse_dt(t.get("match_time")) or _parse_dt(t.get("last_update"))
+        if not dt:
+            continue
+
+        if start_utc <= dt <= end_utc:
+            hits.append((t, dt))
+
+    print(f"[redeem] hits in window: {len(hits)}")
+
+    for t, dt in hits[:20]:
+        print(
+            "[redeem][TRADE]",
+            {
+                "dt": dt.isoformat(),
+                "market": t.get("market"),
+                "outcome": t.get("outcome"),
+                "side": t.get("side"),
+                "price": t.get("price"),
+                "size": t.get("size"),
+                "status": t.get("status"),
+            },
+        )
+
+    print("[redeem] END")
+
+
+# =====================================
+# ON-CHAIN REDEEM (EOA)
+# =====================================
+
+_CT_ABI = [
     {
         "inputs": [
             {"internalType": "address", "name": "collateralToken", "type": "address"},
@@ -64,331 +168,258 @@ CTF_ABI = [
 ]
 
 
-@dataclass
-class RedeemCandidate:
-    slug: str
-    condition_id: str
-    collateral: str
-    winning_index: int
-    winning_index_set: int
-    token_id: str
-    token_balance: int
+def _bool_env(name: str, default: str = "false") -> bool:
+    return os.getenv(name, default).strip().lower() in ("1", "true", "yes", "y")
 
 
-def _safe_json(resp: requests.Response) -> Any:
-    try:
-        return resp.json()
-    except Exception:
-        raise RuntimeError(
-            f"Gamma no devolvió JSON. Status={resp.status_code}, body={resp.text[:300]}"
-        )
+def _data_api_url(cfg: Config) -> str:
+    return (cfg.data_api_url or "https://data-api.polymarket.com").rstrip("/")
 
 
-def _parse_listish(v: Any, default: list[str] | None = None) -> list[str]:
-    if isinstance(v, list):
-        return [str(x) for x in v]
-    if isinstance(v, str):
-        s = v.strip()
-        try:
-            arr = json.loads(s)
-            if isinstance(arr, list):
-                return [str(x) for x in arr]
-        except Exception:
-            pass
-    return default or []
-
-
-def _parse_int_listish(v: Any) -> list[int]:
-    if isinstance(v, list):
-        out: list[int] = []
-        for x in v:
-            try:
-                out.append(int(x))
-            except Exception:
-                pass
-        return out
-    if isinstance(v, str):
-        try:
-            arr = json.loads(v)
-            if isinstance(arr, list):
-                return [int(x) for x in arr]
-        except Exception:
-            pass
-    return []
-
-
-def _market_is_resolved(m: dict) -> bool:
-    # Gamma fields vary. Accept multiple.
-    if m.get("resolved") is True or m.get("isResolved") is True:
-        return True
-    if m.get("closed") is True and (
-        m.get("winner") or m.get("winningOutcome") or m.get("payoutNumerators")
-    ):
-        return True
-    if m.get("resolution"):
-        return True
-    return False
-
-
-def _extract_condition_id(m: dict) -> str | None:
-    for k in ("conditionId", "condition_id", "conditionID"):
-        v = m.get(k)
-        if isinstance(v, str) and v.startswith("0x") and len(v) == 66:
-            return v
-    return None
-
-
-def _pick_winning_index(m: dict, outcomes: list[str]) -> int | None:
-    # 1) explicit winner
-    winner = m.get("winner") or m.get("winningOutcome") or m.get("resolvedOutcome")
-    if isinstance(winner, str) and outcomes:
-        wl = winner.strip().lower()
-        for i, o in enumerate(outcomes):
-            if str(o).strip().lower() == wl:
-                return i
-
-    # 2) payout numerators
-    pn = _parse_int_listish(m.get("payoutNumerators") or m.get("payout_numerators"))
-    if pn:
-        for i, x in enumerate(pn):
-            if x and x > 0:
-                return i
-
-    return None
-
-
-def _clob_token_ids(m: dict) -> list[str]:
-    v = m.get("clobTokenIds") or m.get("clob_token_ids")
-    ids = _parse_listish(v, default=[])
-    if not ids and isinstance(m.get("clob"), dict):
-        ids = _parse_listish(m["clob"].get("tokenIds"), default=[])
-    return ids
-
-
-def _collateral_from_market(m: dict, cfg: Config) -> str:
-    for k in ("collateralAddress", "collateral", "collateralToken", "collateral_token"):
-        v = m.get(k)
-        if isinstance(v, str) and v.startswith("0x") and len(v) == 42:
-            return v
-    return cfg.collateral_token_address
-
-
-def _slug_prefix(cfg: Config) -> str:
-    # For btc-up-or-down-5m, the market slug uses btc-updown-5m-
-    if cfg.series_slug == "btc-up-or-down-5m":
-        return "btc-updown-5m-"
-    return "btc-"
-
-
-def _dt_to_z(dt: datetime) -> str:
-    return dt.astimezone(pytz.UTC).isoformat().replace("+00:00", "Z")
-
-
-def _anchor_end_utc(cfg: Config) -> datetime:
-    anchor = (getattr(cfg, "redeem_anchor", "window_end") or "window_end").strip().lower()
-    if anchor == "now":
-        return datetime.now(tz=pytz.UTC)
-
-    # default: anchor to WINDOW_END in Europe/Madrid
-    try:
-        return cfg.parse_local_dt(cfg.window_end_local).astimezone(pytz.UTC)
-    except Exception:
-        return datetime.now(tz=pytz.UTC)
-
-
-def _gamma_markets_between(cfg: Config, start_min_z: str, start_max_z: str) -> list[dict]:
-    """Query Gamma with server-side startDate filtering."""
-    url = f"{cfg.gamma_host.rstrip('/')}/markets"
-    limit = min(cfg.max_markets, 200)
+def _fetch_positions(cfg: Config) -> list[dict]:
+    """Fetch wallet positions from Polymarket Data API (best-effort)."""
+    base = f"{_data_api_url(cfg)}/positions"
+    limit = 500
     offset = 0
     out: list[dict] = []
-    prefix = _slug_prefix(cfg)
 
     while True:
-        params = {
-            "limit": limit,
-            "offset": offset,
-            "order": "startDate",
-            "ascending": "true",
-            "archived": "false",
-            # include closed for redeem
-            "start_date_min": start_min_z,
-            "start_date_max": start_max_z,
-        }
-        r = requests.get(url, params=params, timeout=30)
+        url = (
+            f"{base}?user={cfg.funder_address}"
+            f"&redeemable=true&sizeThreshold=0&limit={limit}&offset={offset}"
+        )
+        r = requests.get(url, timeout=30)
         r.raise_for_status()
-        page = _safe_json(r)
+        data = r.json()
+        if not isinstance(data, list):
+            raise RuntimeError(f"Unexpected positions payload: {type(data)}")
 
-        if not isinstance(page, list):
-            raise RuntimeError(f"Respuesta Gamma inesperada: {type(page)}")
-
-        if page:
-            first = page[0].get("startDate")
-            last = page[-1].get("startDate")
-            print(f"[redeem][Gamma page offset={offset}] first={first} last={last} count={len(page)}")
+        if offset == 0:
+            keys = list(data[0].keys())[:30] if data else []
+            print(f"[redeem][positions] page0 count={len(data)} sampleKeys={','.join(keys)}")
         else:
-            print(f"[redeem][Gamma page offset={offset}] empty")
+            print(f"[redeem][positions] offset={offset} count={len(data)}")
 
-        for m in page:
-            slug = str(m.get("slug", ""))
-            if slug.startswith(prefix):
-                out.append(m)
-
-        if len(page) < limit:
+        out.extend(data)
+        if len(data) < limit:
             break
         offset += limit
+        if offset > 5000:
+            break
 
     return out
 
 
-def _build_candidates(cfg: Config, w3: Web3, owner: str, start_utc: datetime, end_utc: datetime) -> list[RedeemCandidate]:
-    markets = _gamma_markets_between(cfg, _dt_to_z(start_utc), _dt_to_z(end_utc))
-    if not markets:
-        print("[redeem] no markets returned by Gamma in that startDate window.")
-        return []
-
-    # Polymarket uses an ERC-1155 for outcome positions.
-    # In our config this is called conditional_tokens_address.
-    erc1155 = w3.eth.contract(
-        address=Web3.to_checksum_address(cfg.conditional_tokens_address), abi=ERC1155_ABI
-    )
-
-    cands: list[RedeemCandidate] = []
-
-    for m in markets:
-        slug = str(m.get("slug", "?"))
-        if not _market_is_resolved(m):
-            continue
-
-        condition_id = _extract_condition_id(m)
-        if not condition_id:
-            continue
-
-        outcomes = _parse_listish(m.get("outcomes"), default=[])
-        win_idx = _pick_winning_index(m, outcomes)
-        if win_idx is None:
-            continue
-
-        token_ids = _clob_token_ids(m)
-        if len(token_ids) < (win_idx + 1):
-            continue
-
-        token_id = token_ids[win_idx]
+def _parse_iso(v: Any) -> Optional[datetime]:
+    if not v:
+        return None
+    if isinstance(v, datetime):
+        return v
+    if isinstance(v, (int, float)):
+        # seconds
+        return datetime.fromtimestamp(float(v), tz=timezone.utc)
+    if isinstance(v, str):
         try:
-            bal = int(
-                erc1155.functions.balanceOf(Web3.to_checksum_address(owner), int(token_id)).call()
-            )
+            s = v.strip().replace("Z", "+00:00")
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
         except Exception:
+            return None
+    return None
+
+
+def _position_timestamp(pos: dict) -> Optional[datetime]:
+    for k in (
+        "resolvedAt",
+        "marketEndTime",
+        "eventEndTime",
+        "endTime",
+        "marketStartTime",
+        "eventStartTime",
+        "startTime",
+        "startDate",
+        "createdAt",
+        "updatedAt",
+    ):
+        dt = _parse_iso(pos.get(k))
+        if dt:
+            return dt
+    return None
+
+
+def _to_usd(pos: dict) -> float:
+    v = pos.get("redeemable")
+    if v is None:
+        v = pos.get("redeemableValue")
+    if v is None:
+        v = pos.get("redeemable_value")
+    try:
+        return float(v or 0)
+    except Exception:
+        return 0.0
+
+
+def _pick_redeemables(cfg: Config, positions: list[dict], lookback_hours: int) -> list[dict]:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=int(lookback_hours))
+    out: list[dict] = []
+    for p in positions:
+        usd = _to_usd(p)
+        is_redeemable = bool(p.get("isRedeemable") is True or usd > 0)
+        if not is_redeemable:
+            continue
+        if usd < float(getattr(cfg, "min_redeemable_usd", 0) or 0):
+            continue
+        ts = _position_timestamp(p)
+        if ts and ts < cutoff:
             continue
 
-        if bal <= 0:
+        condition_id = p.get("conditionId") or p.get("condition_id") or p.get("condition")
+        index_set = p.get("indexSet") or p.get("index_set") or p.get("index")
+        if not condition_id or index_set is None:
             continue
 
-        index_set = 1 << int(win_idx)
-        cands.append(
-            RedeemCandidate(
-                slug=slug,
-                condition_id=condition_id,
-                collateral=_collateral_from_market(m, cfg),
-                winning_index=int(win_idx),
-                winning_index_set=int(index_set),
-                token_id=str(token_id),
-                token_balance=int(bal),
-            )
+        out.append(
+            {
+                "conditionId": str(condition_id),
+                "indexSet": str(index_set),
+                "redeemableUsd": usd,
+                "ts": ts.isoformat() if ts else None,
+                "marketSlug": p.get("marketSlug") or p.get("slug") or p.get("market") or p.get("marketId"),
+            }
         )
 
-    return cands
+    return out
 
 
-def redeem_last_hours(cfg: Config) -> None:
-    """Redeem any resolved winning positions in the lookback window.
-
-    Window is anchored to WINDOW_END (Europe/Madrid) by default.
-    Set REDEEM_ANCHOR=now to anchor to current time.
-
-    Required envs (in addition to your trading envs):
-    - POLYGON_RPC_URL (recommended; otherwise your bot may fail to connect)
-    """
-
-    if not cfg.auto_redeem:
-        return
-
-    print("[redeem] START")
-
-    end_utc = _anchor_end_utc(cfg)
-    start_utc = end_utc - timedelta(hours=int(cfg.redeem_lookback_hours))
-    print(
-        f"[redeem] lookback_hours={cfg.redeem_lookback_hours} start_utc={start_utc.isoformat()} end_utc={end_utc.isoformat()} anchor={getattr(cfg, 'redeem_anchor', 'window_end')}"
-    )
-
-    if not cfg.polygon_rpc_url:
-        print("[redeem][WARN] POLYGON_RPC_URL not set; cannot redeem on-chain.")
-        print("[redeem] END")
-        return
-
-    w3 = Web3(Web3.HTTPProvider(cfg.polygon_rpc_url, request_kwargs={"timeout": 30}))
+def _mk_web3(cfg: Config) -> Web3:
+    if Web3 is None:
+        raise RuntimeError("web3 is not installed. Did you install requirements.txt?")
+    if not cfg.rpc_url:
+        raise RuntimeError("RPC_URL is required for on-chain redeem")
+    w3 = Web3(Web3.HTTPProvider(cfg.rpc_url, request_kwargs={"timeout": 30}))
     if not w3.is_connected():
-        print("[redeem][WARN] could not connect to Polygon RPC; cannot redeem on-chain.")
+        raise RuntimeError("Could not connect to RPC_URL")
+    return w3
+
+
+def _gas_params(w3: Web3) -> dict:
+    """Best-effort gas params supporting both legacy and EIP-1559."""
+    # If node supports baseFeePerGas, use EIP-1559.
+    try:
+        block = w3.eth.get_block("latest")
+        base_fee = block.get("baseFeePerGas")
+        if base_fee is not None:
+            prio_gwei = float(os.getenv("MAX_PRIORITY_FEE_GWEI", "30"))
+            prio = w3.to_wei(prio_gwei, "gwei")
+            max_fee = int(base_fee) * 2 + int(prio)
+            return {"maxFeePerGas": max_fee, "maxPriorityFeePerGas": int(prio)}
+    except Exception:
+        pass
+
+    # Fallback legacy gasPrice.
+    gas_price = w3.eth.gas_price
+    bump = float(os.getenv("GAS_PRICE_BUMP", "1.2"))
+    return {"gasPrice": int(gas_price * bump)}
+
+
+def redeem_onchain_last_hours(cfg: Config, lookback_hours: int) -> None:
+    print("[redeem] START (on-chain)")
+    print(f"[redeem] lookback_hours={lookback_hours} min_redeemable_usd={cfg.min_redeemable_usd}")
+
+    positions = _fetch_positions(cfg)
+    redeemables = _pick_redeemables(cfg, positions, lookback_hours)
+
+    if not redeemables:
+        print(
+            "[redeem] No hay posiciones redeemables en Data API (o no hay shares en wallet). "
+            "OJO: si compraste en CLOB, es posible que las shares estén en el exchange y necesites WITHDRAW a tu wallet antes de poder hacer redeem."
+        )
         print("[redeem] END")
         return
 
+    print(f"[redeem] redeemables={len(redeemables)}")
+    for r in redeemables[:50]:
+        t = f" ts={r['ts']}" if r.get("ts") else ""
+        s = f" slug={r['marketSlug']}" if r.get("marketSlug") else ""
+        print(
+            f"[redeem][pos] conditionId={r['conditionId']} indexSet={r['indexSet']} redeemableUsd~{r['redeemableUsd']}{t}{s}"
+        )
+    if len(redeemables) > 50:
+        print(f"[redeem] (+{len(redeemables)-50} más)")
+
+    if cfg.dry_run or _bool_env("DRY_RUN", "false"):
+        print("[redeem] DRY_RUN=true -> no envío transacciones.")
+        print("[redeem] END")
+        return
+
+    w3 = _mk_web3(cfg)
     acct = w3.eth.account.from_key(cfg.private_key)
-    owner = acct.address
-
-    if cfg.funder_address and owner.lower() != cfg.funder_address.lower():
+    if acct.address.lower() != cfg.funder_address.lower():
         print(
-            f"[redeem][WARN] PRIVATE_KEY address ({owner}) != FUNDER_ADDRESS ({cfg.funder_address}). Redeem will use PRIVATE_KEY address."
+            f"[redeem][WARN] FUNDER_ADDRESS ({cfg.funder_address}) no coincide con address derivada de PRIVATE_KEY ({acct.address}). "
+            "Continuo usando la PRIVATE_KEY para firmar (EOA)."
         )
 
-    cands = _build_candidates(cfg, w3, owner, start_utc, end_utc)
-    print(f"[redeem] candidates found: {len(cands)}")
+    ct_addr = w3.to_checksum_address(cfg.conditional_tokens_address)
+    collateral_addr = w3.to_checksum_address(cfg.collateral_token_address)
+    ct = w3.eth.contract(address=ct_addr, abi=_CT_ABI)
 
-    if not cands:
-        print("[redeem] nothing to redeem in that window.")
-        print("[redeem] END")
-        return
-
-    ctf = w3.eth.contract(
-        address=Web3.to_checksum_address(cfg.conditional_tokens_address), abi=CTF_ABI
-    )
-
-    parent_collection_id = bytes.fromhex("00" * 32)
-
-    for c in cands:
-        print(
-            f"[redeem] attempting redeem slug={c.slug} conditionId={c.condition_id} win_index={c.winning_index} token_id={c.token_id} bal={c.token_balance}"
-        )
+    # Group by conditionId to batch indexSets per tx
+    grouped: dict[str, set[int]] = {}
+    for r in redeemables:
+        cid = str(r["conditionId"])
+        idx_raw = str(r["indexSet"]).strip()
         try:
-            tx = ctf.functions.redeemPositions(
-                Web3.to_checksum_address(c.collateral),
-                parent_collection_id,
-                Web3.to_bytes(hexstr=c.condition_id),
-                [int(c.winning_index_set)],
+            idx = int(idx_raw, 0)  # handles "0x.." and decimal
+        except Exception:
+            idx = int(float(idx_raw))
+        grouped.setdefault(cid, set()).add(idx)
+
+    nonce = w3.eth.get_transaction_count(acct.address)
+    sent = 0
+    for cid, idxs in grouped.items():
+        idx_list = sorted(list(idxs))
+        try:
+            tx = ct.functions.redeemPositions(
+                collateral_addr,
+                "0x" + "00" * 32,  # parentCollectionId = bytes32(0)
+                cid,
+                idx_list,
             ).build_transaction(
                 {
-                    "from": owner,
-                    "nonce": w3.eth.get_transaction_count(owner),
+                    "from": acct.address,
+                    "nonce": nonce,
+                    "chainId": int(cfg.chain_id),
+                    **_gas_params(w3),
                 }
             )
-
-            # EIP-1559 defaults (Polygon supports it)
-            if "maxFeePerGas" not in tx:
-                try:
-                    base = w3.eth.gas_price
-                except Exception:
-                    base = 50_000_000_000  # 50 gwei
-                tx["maxFeePerGas"] = int(base * 2)
-                tx["maxPriorityFeePerGas"] = int(base * 0.25)
-
+            # estimate gas and add a buffer
             try:
-                tx["gas"] = int(w3.eth.estimate_gas(tx) * 1.2)
+                est = w3.eth.estimate_gas(tx)
+                tx["gas"] = int(est * 1.25)
             except Exception:
-                tx["gas"] = 350_000
+                tx.setdefault("gas", 600_000)
 
             signed = acct.sign_transaction(tx)
             tx_hash = w3.eth.send_raw_transaction(signed.rawTransaction)
-            print(f"[redeem][SENT] {c.slug} tx={tx_hash.hex()}")
-        except Exception as e:
-            print(f"[redeem][FAIL] {c.slug}: {e}")
+            sent += 1
+            print(f"[redeem][tx] sent conditionId={cid} indexSets={idx_list} hash={tx_hash.hex()}")
 
+            confs = int(getattr(cfg, "redeem_wait_confirmations", 1) or 1)
+            if confs > 0:
+                receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=300)
+                status = receipt.get("status")
+                if status != 1:
+                    print(f"[redeem][tx][FAIL] status={status} hash={tx_hash.hex()}")
+                else:
+                    print(f"[redeem][tx][OK] block={receipt.get('blockNumber')} hash={tx_hash.hex()}")
+
+            nonce += 1
+        except Exception as e:
+            print(f"[redeem][tx][FAIL] conditionId={cid}: {e}")
+            nonce += 1
+
+    print(f"[redeem] submitted_txs={sent} groups={len(grouped)}")
     print("[redeem] END")
