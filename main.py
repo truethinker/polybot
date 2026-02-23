@@ -210,3 +210,9 @@ def _run_auto_mode(cfg):
 
 
 def main():
+print("=== AUTO_MODE ENABLED ===")
+
+if AUTO_MODE:
+    run_auto_loop()
+else:
+    run_single_execution()
