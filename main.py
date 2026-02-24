@@ -1,7 +1,7 @@
 import os
 os.environ["PYTHONUNBUFFERED"] = "1"
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time
 
 from tool.config import load_config
@@ -106,7 +106,10 @@ def _run_auto_mode(cfg):
     placed_slugs: set[str] = set()
     last_redeem = 0.0
 
-    next_plan_run = _ceil_to_interval(datetime.now(cfg.tz), plan_every_min)
+    # Base temporal del planner: igual que redeem -> WINDOW_END (UTC) convertido a local
+    end_utc = datetime.fromisoformat(cfg.window_end_utc_iso().replace("Z", "+00:00"))
+    base_local = end_utc.astimezone(cfg.tz)
+    next_plan_run = _ceil_to_interval(base_local, plan_every_min)
 
     print("=== AUTO_MODE ENABLED ===", flush=True)
     print(
@@ -130,9 +133,12 @@ def _run_auto_mode(cfg):
 
         # Planificación SOLO cuando toque (cada 30' alineado)
         if now_local >= next_plan_run:
-            start_local = next_plan_run + timedelta(minutes=target_offset_min)
-            end_local = start_local + timedelta(minutes=slot_min)
+        # cursor = next_plan_run, que avanza cada plan_every_min
+            cursor_local = next_plan_run
 
+            start_local = cursor_local + timedelta(minutes=target_offset_min)
+            end_local = start_local + timedelta(minutes=slot_min)
+            
             cfg.window_start_local = start_local.strftime("%Y-%m-%d %H:%M")
             cfg.window_end_local = end_local.strftime("%Y-%m-%d %H:%M")
 
