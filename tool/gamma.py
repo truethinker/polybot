@@ -63,30 +63,3 @@ def gamma_list_markets_for_series_in_window(cfg: Config) -> list[dict]:
         offset += limit
 
     return out
-
-
-def gamma_get_markets_by_slugs(cfg: Config, slugs: list[str]) -> list[dict]:
-    """Consulta Gamma por slugs específicos.
-
-    Útil para mercados 5m donde la indexación por ventana puede ir con retraso.
-    """
-    if not slugs:
-        return []
-
-    url = f"{cfg.gamma_host.rstrip('/')}/markets"
-
-    # Gamma acepta arrays en querystring: slug=...&slug=...
-    params = {
-        "slug": slugs,
-        "limit": min(len(slugs), 200),
-        "offset": 0,
-    }
-
-    r = requests.get(url, params=params, timeout=30)
-    r.raise_for_status()
-    page = _safe_json(r)
-
-    if not isinstance(page, list):
-        raise RuntimeError(f"Respuesta Gamma inesperada (slug lookup): {type(page)}")
-
-    return page
